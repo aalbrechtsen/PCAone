@@ -286,7 +286,7 @@ void run_pca_with_halko(Data* data, const Param& params) {
       if (params.ld)
         rsvd->setFlags(false, false);
       else
-        rsvd->setFlags(false, true);
+        rsvd->setFlags(false, params.standardize_geno);
     } else {
       rsvd->setFlags(false, false);
     }

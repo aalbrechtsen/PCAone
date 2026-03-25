@@ -42,7 +42,7 @@ Param::Param(int argc, char **argv) {
                                                    "2: the accurate window-based Randomized SVD method (PCAone);\n"
                                                    "3: the full Singular Value Decomposition.", 2);
   opts.add<Value<uint>>("k", "pc", "top k principal components (PCs) to be calculated", k, &k);
-  opts.add<Value<uint>>("C", "scale", "do scaling for input file. Options are\n"
+  auto scale_opt = opts.add<Value<uint>>("C", "scale", "do scaling for input file. Options are\n"
                                       "0: do nothing and proceed to SVD;\n"
                                       "1: do only standardization;\n"
                                       "2: do count per median log transformation (CPMED);\n"
@@ -190,6 +190,9 @@ Param::Param(int argc, char **argv) {
     oversamples = oversamples > k ? oversamples : k;
     if (haploid && (file_t == FileType::PLINK || file_t == FileType::BGEN)) ploidy = 1;
     if (memory > 0 && svd_t != SvdType::FULL) out_of_core = true;
+    if ((file_t == FileType::PLINK || file_t == FileType::BGEN) && scale_opt->is_set()) {
+      standardize_geno = (scale != 0);
+    }
     if (maf > 0.5) {
       std::cerr << "warning: '--maf' with a value greater than 0.5 will be converted to 1 - maf.\n";
       maf = 1 - maf;

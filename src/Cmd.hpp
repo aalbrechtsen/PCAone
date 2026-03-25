@@ -86,6 +86,7 @@ class Param {
   int seed = 101; // seeding 
   bool keepsnp = false;
   bool center = true; // false if G is raw data likelihood
+  bool standardize_geno = true; // variance-standardize genotype input unless explicitly disabled
   bool estaf = true; // false if project,inbreed enabled
   // bool estpi = false; // true if output pi is needed
 

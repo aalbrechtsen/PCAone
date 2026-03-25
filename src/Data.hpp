@@ -53,6 +53,11 @@ class Data {
   ArrBool C;     // nsnps x nsample, if there is missing value
   Arr2D centered_geno_lookup;
   std::vector<int> keepSNPs;  // store index of SNPs to keep
+  Int1D project_ref_indices;  // reference SNP row for each target SNP, or -1 if unmatched
+  Int1D project_flip;         // 1 if target alleles are swapped relative to reference
+  uint project_overlap = 0;
+  uint project_flipped = 0;
+  uint project_skipped = 0;
 };
 
 #endif  // PCAONE_DATA_

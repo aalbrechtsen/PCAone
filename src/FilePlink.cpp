@@ -64,7 +64,7 @@ void FileBed::read_all() {
   } 
 
   G = Mat2D::Zero(nsamples, nsnps);  // fill in G with new size
-  if (params.emu) C = ArrBool::Zero(nsnps * nsamples);
+  if (params.emu || params.project > 0) C = ArrBool::Zero(nsnps * nsamples);
   if (params.pcangsd) P = Mat2D::Zero(nsamples * 2, nsnps);
 
 #pragma omp parallel for private(i, j, b, c, k, buf)
@@ -76,8 +76,8 @@ void FileBed::read_all() {
         if (j < nsamples) {
           G(j, i) = BED2GENO[buf & 3];
           buf >>= 2;
-          if (params.emu) {
-            // 1 indicate G(i,j) need to be predicted and updated.
+          if (C.size()) {
+            // 1 indicates the genotype is missing at this site for this sample.
             if (G(j, i) != BED_MISSING_VALUE)
               C[i * nsamples + j] = 0;
             else

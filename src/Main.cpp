@@ -77,8 +77,11 @@ int main(int argc, char* argv[]) {
   }
 
   // particular case for projection
-  if ((params.project > 0) && (params.file_t == FileType::PLINK)) {
-    data = new FileBed(params);
+  if ((params.project > 0) && (params.file_t == FileType::PLINK || params.file_t == FileType::BEAGLE)) {
+    if (params.file_t == FileType::PLINK)
+      data = new FileBed(params);
+    else
+      data = new FileBeagle(params);
     run_projection(data, params);
     delete data;
     return bye();
@@ -128,7 +131,8 @@ int main(int argc, char* argv[]) {
   } else if (params.svd_t == SvdType::PCAoneAlg1 || params.svd_t == SvdType::PCAoneAlg2) {
     run_pca_with_halko(data, params);
   } else if (params.svd_t == SvdType::FULL) {
-    if (params.file_t == FileType::PLINK || params.file_t == FileType::BGEN) data->standardize_E();
+    if ((params.file_t == FileType::PLINK || params.file_t == FileType::BGEN) && params.standardize_geno)
+      data->standardize_E();
     cao.print(tick.date(), "running the Full SVD with in-core mode.");
     Eigen::JacobiSVD<Mat2D> svd(data->G, Eigen::ComputeThinU | Eigen::ComputeThinV);
     data->write_eigs_files(svd.singularValues().array().square() / data->nsnps, svd.singularValues(), svd.matrixU(), svd.matrixV());
