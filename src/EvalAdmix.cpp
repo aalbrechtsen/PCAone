@@ -151,4 +151,11 @@ void run_evaladmix(Data* data, const Param& params) {
   write_matrix(params.fileout + ".kinship", kin, ids);
   cao.print(tick.date(), "evalAdmix: correlation of residuals saved to", params.fileout + ".corres");
   cao.print(tick.date(), "evalAdmix: kinship (corres/2) saved to", params.fileout + ".kinship");
+
+  // Record which sites the PCA actually used, with their allele frequencies.
+  // Downstream tools (pcaone-ibd) must apply exactly the same site filter, or
+  // the individual allele frequencies they derive will not correspond to these
+  // PCs. Only -D/--ld wrote a .mbim before.
+  data->save_snps_in_mbim();
+  cao.print(tick.date(), "evalAdmix: sites used saved to", params.fileout + ".mbim");
 }

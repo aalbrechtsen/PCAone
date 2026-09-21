@@ -147,12 +147,17 @@ SLIBS += ./external/bgen/bgenlib.a ./external/zstd/lib/libzstd.a  ./external/pge
 
 LIBS += $(SLIBS) $(DLIBS) -lpthread -ldl -lm
 
-.PHONY: all clean island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence
+.PHONY: all clean ibd island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence
 
-all: ${program}
+all: ${program} pcaone-ibd
 
 ${program}: zstdlib bgenlib pgenlib $(PCALIB) src/Main.o
 	$(CXX) $(CXXFLAGS) -o $(program) src/Main.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
+
+# standalone: reads PCAone output + PLINK genotypes, shares no state with PCAone
+ibd: pcaone-ibd
+pcaone-ibd: src/PcaoneIbd.cpp
+	$(CXX) $(CXXFLAGS) -fopenmp -o pcaone-ibd src/PcaoneIbd.cpp $(INC) $(LDFLAGS)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(MYFLAGS) -o $@ -c $< $(INC) $(CPPFLAGS)
@@ -176,11 +181,11 @@ test_pgen_plink_equivalence: ${program}
 	python3 tests/pgen_plink_equivalence.py
 
 rm:
-	(rm -f src/*.o $(program))
+	(rm -f src/*.o $(program) pcaone-ibd)
 	(cd ./external/bgen/; $(MAKE) clean)
 
 clean:
-	(rm -f src/*.o $(program))
+	(rm -f src/*.o $(program) pcaone-ibd)
 	(cd ./external/bgen/; $(MAKE) clean)
 	(cd ./external/pgenlib/; $(MAKE) clean)
 	(cd ./external/zstd/lib/; $(MAKE) clean)

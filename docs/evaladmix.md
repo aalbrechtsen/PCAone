@@ -211,6 +211,22 @@ exactly.
   branch also fixes — see [read-usv-fix.md](read-usv-fix.md). `--evaladmix-k` is
   a direct regression test for that bug.
 
+## Getting (k0, k1, k2)
+
+Kinship cannot separate parent–offspring from full sibs — both have
+`phi = 1/4`, and this reports 0.2496 and 0.2475 for them. The IBD sharing
+probabilities can, and [`pcaone-ibd`](pcaone-ibd.md) estimates them from this
+run's output:
+
+```bash
+PCAone     -b plink -k <K-1> --evaladmix -o pcs
+pcaone-ibd -b plink -P pcs --min-kin 0.05 -o rel
+```
+
+giving `k0 = 0.000, k1 = 0.998` for parent–offspring against
+`k0 = 0.253, k1 = 0.504` for full sibs. `--evaladmix` writes the `.mbim` that
+tool needs in order to apply the same site filter.
+
 ## Limitations
 
 - PLINK bed / PLINK2 pgen input only.
