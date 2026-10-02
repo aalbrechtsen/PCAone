@@ -1,0 +1,967 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{hdr}{HTML}{1F3864}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-2.4ex \@plus -1ex \@minus -.2ex}{1.3ex \@plus.2ex}%
+  {\normalfont\large\bfseries\color{hdr}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2.0ex \@plus -1ex \@minus -.2ex}{1.0ex \@plus.2ex}%
+  {\normalfont\normalsize\bfseries\color{hdr}}}
+\makeatother
+\newenvironment{tightitem}{%
+  \begin{itemize}\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}%
+  \setlength{\topsep}{3pt}\setlength{\parsep}{0pt}}{\end{itemize}}
+\renewcommand{\arraystretch}{1.15}
+
+\title{\vspace{-1.4cm}\color{hdr}\bfseries Three Ways to Estimate Kinship Under Population Structure\\[2pt]
+\large\mdseries\color{black} PC-Relate, PCAngsd and evalAdmix compared,
+and how PC-Relate derives $(k_0,k_1,k_2)$}
+\author{}
+\date{\small Compiled \today}
+
+\begin{document}
+\maketitle
+\vspace{-1.1cm}
+
+\section{They are the same estimator}
+
+The headline result of this note is that PC-Relate, PCAngsd's kinship estimator and evalAdmix's correlation
+of residuals are not three competing ideas. They are one idea, instantiated three times, and they differ only
+in bookkeeping. The idea is:
+
+\begin{quote}
+Predict each individual's genotype from their \emph{ancestry} alone. Whatever is left over --- the residual
+--- is what ancestry cannot explain. Two individuals who share recent ancestors deviate from their
+predictions in the \emph{same direction}, so the covariance of their residuals measures relatedness.
+\end{quote}
+
+Formally, let $g_{is}\in\{0,1,2\}$ be the allele count for individual $i$ at site $s$, and let
+$\pi_{is}$ be the \emph{individual allele frequency} --- the frequency expected at site $s$ given $i$'s
+ancestry. Because a genotype is the sum of two alleles,
+\begin{equation}
+\operatorname{Cov}(g_{is},g_{js}) = 4\phi_{ij}\,\pi_s(1-\pi_s),
+\qquad
+\operatorname{Var}(g_{is}) = 2\pi_s(1-\pi_s),
+\label{eq:cov}
+\end{equation}
+so the \emph{correlation} of the two residuals is $2\phi_{ij}$ and the covariance normalised by
+$4\pi(1-\pi)$ is $\phi_{ij}$ itself. Every method below is a sample version of
+Equation~\eqref{eq:cov}. What separates them is exactly three choices:
+
+\begin{tightitem}
+  \item[\textbf{(i)}] \textbf{Where $\hat\pi$ comes from} --- a projection onto principal components,
+  or a discrete $K$-population admixture model.
+  \item[\textbf{(ii)}] \textbf{What goes in the denominator} --- the variance the \emph{model} predicts,
+  $\sqrt{\hat\pi(1-\hat\pi)}$, or the variance the residuals \emph{actually have}.
+  \item[\textbf{(iii)}] \textbf{Whether the pair's own genotypes were used to build $\hat\pi$} --- and if so,
+  whether anything is done about it.
+\end{tightitem}
+
+\noindent
+Choice (iii) is the one that matters most in practice, and it is where the three methods genuinely diverge.
+
+\section{The three methods}
+
+\subsection{PC-Relate}
+
+$\hat\pi$ comes from a linear regression of genotypes on ancestry-representative principal components: with
+$V$ the matrix of PCs (plus an intercept), $2\hat\mu_{is}$ is the fitted value of $g_{is}$.
+The residual is $R_{is}=g_{is}-2\hat\mu_{is}$ and
+\begin{equation}
+\hat\phi^{\text{PC-Relate}}_{ij}
+=\frac{\sum_s R_{is}R_{js}}
+{4\sum_s \sqrt{\hat\mu_{is}(1-\hat\mu_{is})\,\hat\mu_{js}(1-\hat\mu_{js})}} .
+\label{eq:pcrelate}
+\end{equation}
+The denominator is the \emph{model-expected} residual variance. As instructed, we set aside here the fact
+that GENESIS obtains the PCs from PC-AiR on a mutually unrelated training set; that is a property of how the
+PCs are built, not of the estimator. PC-Relate is the only one of the three that goes on to produce IBD
+sharing probabilities (Section~\ref{sec:ibd}).
+
+\subsection{PCAngsd}
+
+$\hat\pi$ comes from a truncated SVD of the centred genotype \emph{dosages}, iterated: estimate population
+frequencies $\hat p_s$, form posterior genotype probabilities and dosages
+$E[g_{is}\mid X_{is},\hat\pi_{is}]$ from genotype likelihoods, take the rank-$D$ SVD of the centred dosages,
+add $2\hat p_s$ back, and feed $\hat\pi$ in again as the prior until convergence.
+
+The kinship estimator itself is then \emph{identical in form} to
+Equation~\eqref{eq:pcrelate}. Reading it off the source of the last version that shipped it
+(\texttt{kinship.py}, \texttt{kinship\_cy.pyx}): the numerator matrix is set to $E-2\hat\Pi$, the denominator
+matrix to $\sqrt{\hat\Pi(1-\hat\Pi)}$, and the result is their cross-product ratio divided by $4$ ---
+Equation~\eqref{eq:pcrelate} with dosages in place of called genotypes. The file is even named for it: its
+docstring reads \emph{``Kinship estimator using genotype likelihoods based on PC-Relate''}, and the function
+is \texttt{kinshipConomos}. The diagonal is handled separately, from the genotype posteriors, to give
+inbreeding coefficients.
+
+So PCAngsd's kinship is PC-Relate, with two substantive changes: $\hat\pi$ is obtained by iterated SVD
+rather than one regression, and the input is genotype likelihoods, so nothing is ever hard-called. That
+second point is the real contribution --- it is what makes the estimator usable at low depth.
+
+\textbf{Status.} This is no longer available. The \texttt{-kinship} flag, and the companion \texttt{-relate}
+option for dropping related individuals from a Beagle file, were removed in the January 2021 Cython rework;
+\texttt{kinship.py} and \texttt{kinship\_cy.pyx} were deleted the same day. Current PCAngsd (v1.36) exposes
+only \texttt{-{}-inbreed-sites} and \texttt{-{}-inbreed-samples}. PCAone, which re-implements the PCAngsd
+algorithm, likewise offers \texttt{-{}-inbreed} but no kinship. For low-depth relatedness today the
+supported route is NGSremix, using PCAngsd or NGSadmix as the front-end.
+
+\subsection{evalAdmix}
+
+$\hat\pi$ comes from the admixture model: $\hat\pi_{is}=\sum_k \hat q_{ik}\hat f_{ks}$, with $\hat q$ and
+$\hat f$ from ADMIXTURE, STRUCTURE or NGSadmix. The residual is again $r_{is}=g_{is}-2\hat\pi_{is}$, but the
+statistic is an ordinary \textbf{Pearson correlation}:
+\begin{equation}
+c_{ij}=\frac{\sum_s (r_{is}-\bar r_i)(r_{js}-\bar r_j)}
+{\sqrt{\sum_s (r_{is}-\bar r_i)^2}\sqrt{\sum_s (r_{js}-\bar r_j)^2}}
+\;\longrightarrow\; 2\phi_{ij}.
+\label{eq:evaladmix}
+\end{equation}
+Two differences from Equation~\eqref{eq:pcrelate} follow. First, \textbf{the scale}: a correlation estimates
+$2\phi$, not $\phi$, so duplicate pairs return $1$ and full sibs $\tfrac12$. Second, and more interesting,
+\textbf{the denominator is empirical} --- the residuals' own observed variance, not
+$\hat\pi(1-\hat\pi)$. That makes the statistic self-calibrating: anything that inflates residual variance
+uniformly (genotyping error, a slightly wrong $\hat\pi$, unmodelled noise) cancels between numerator and
+denominator, where in Equation~\eqref{eq:pcrelate} it would bias $\hat\phi$ downward.
+
+\textbf{The leave-one-out correction.} This is evalAdmix's distinctive feature and the answer to choice
+(iii) above. Before correlating individual $i$ with individual $j$, it re-estimates the ancestral frequencies
+$F$ with $i$ \emph{excluded} (function \texttt{adaptF}, an EM update run \texttt{-nIts} times, default 5),
+recomputes $j$'s residuals under those frequencies, and correlates $i$'s original residual against $j$'s
+adapted residual. The point is that if $i$'s own genotypes helped define the frequencies, then $i$'s residual
+is shrunk toward zero and the kinship is attenuated. Removing $i$ from the frequency estimation removes that
+feedback.
+
+\textbf{The corrected estimator.} Version 1.0 adds \texttt{-method corrected}, the analytic estimator of
+van~Waaij et al.\ (2023): instead of leave-one-out refitting, compute the empirical residual correlation
+$\hat b$ and subtract the correlation $\hat c$ that the fitted model itself implies, obtained from
+$(\mathbf{I}-\mathbf{P})\hat{\mathbf{D}}(\mathbf{I}-\mathbf{P})$ where $\mathbf{P}$ projects onto the column
+space of $Q$ (or of the PCs). Single-pass instead of iterative, and it needs only genotypes and $Q$ --- no
+\texttt{.P} file. Under a correct model $\hat b-\hat c\to 0$ as sites accumulate.
+
+\textbf{Note on intent.} evalAdmix was written to \emph{test admixture model fit}, not to estimate kinship;
+its documentation mentions relatedness only as a caveat (``positive correlation \dots might also be due to
+relatedness''). But Equation~\eqref{eq:evaladmix} is a kinship estimator whether or not it was meant as one.
+
+\section{Side by side}
+
+\begin{center}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.6cm}
+                  >{\raggedright\arraybackslash}p{3.6cm}
+                  >{\raggedright\arraybackslash}p{3.6cm}
+                  >{\raggedright\arraybackslash}p{4.4cm}@{}}
+\toprule
+ & \textbf{PC-Relate} & \textbf{PCAngsd} & \textbf{evalAdmix} \\
+\midrule
+$\hat\pi$ from & regression on ancestry PCs & iterated truncated SVD on GL dosages & admixture model $\sum_k \hat q_{ik}\hat f_{ks}$ \\
+Input & called genotypes & genotype likelihoods & genotypes or GLs (Beagle) \\
+Needs $K$? & no & no & yes \\
+Statistic & Eq.~\eqref{eq:pcrelate} & Eq.~\eqref{eq:pcrelate} (dosages) & Pearson corr., Eq.~\eqref{eq:evaladmix} \\
+Denominator & model, $\sqrt{\hat\pi(1-\hat\pi)}$ & model, $\sqrt{\hat\pi(1-\hat\pi)}$ & empirical residual SD \\
+Returns & $\phi$ & $\phi$ & $2\phi$ \\
+Self in $\hat\pi$? & yes, uncorrected & yes, uncorrected & \textbf{removed} (leave-one-out or analytic) \\
+$(k_0,k_1,k_2)$? & \textbf{yes} & no & no \\
+Inbreeding & yes & yes & no \\
+Available? & yes (GENESIS) & \textbf{removed in 2021} & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{An empirical comparison}
+
+All three were run on the 126-individual, 104{,}290-SNP example dataset shipped with RelateAdmix ($K=2$),
+which is simulated with a known pedigree: ten pairs each of duplicates, parent--offspring, full sibs, half
+sibs, first cousins and second cousins, and 7{,}815 unrelated pairs. PC-Relate is the genuine GENESIS
+\texttt{pcrelate()}; evalAdmix is the real program, both of its estimators. RelateAdmix is shown as a
+reference point --- it is a different kind of method (constrained full ML), not one of the three; see
+Section~4.4 before reading its RMSE as a ranking. Exact commands and data
+provenance are in Section~7.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+\textbf{Relationship} & \textbf{true $\phi$} & \textbf{PC-Relate} & \textbf{PC-Relate} & \textbf{PCAngsd} & \textbf{evalAdmix} & \textbf{(RelateAdmix)} \\
+ & & (default) & (corr.\ off) & & & \\
+\midrule
+unrelated ($n{=}7815$)       & 0      & $+0.00002$ & $-0.0055$ & $-0.0055$ & $-0.0016$ & $+0.0004$ \\
+second cousin ($n{=}10$)     & 0.0156 & 0.0200 & 0.0132 & 0.0130 & 0.0177 & 0.0116 \\
+first cousin ($n{=}10$)      & 0.0625 & 0.0653 & 0.0564 & 0.0560 & 0.0620 & 0.0526 \\
+half sib ($n{=}10$)          & 0.125  & 0.1268 & 0.1199 & 0.1185 & 0.1223 & 0.1108 \\
+full sib ($n{=}10$)          & 0.25   & 0.2470 & 0.2410 & 0.2410 & 0.2464 & 0.2439 \\
+parent--offspring ($n{=}10$) & 0.25   & 0.2503 & 0.2390 & 0.2374 & 0.2475 & 0.2500 \\
+duplicate ($n{=}10$)         & 0.5    & 0.4972 & 0.4860 & 0.4868 & 0.5000 & 0.5000 \\
+\midrule
+\multicolumn{2}{@{}l}{correlation with truth} & \textbf{0.9891} & 0.9630 & 0.9628 & 0.9883 & 0.9994 \\
+\multicolumn{2}{@{}l}{RMSE}                   & \textbf{0.00331} & 0.00824 & 0.00825 & 0.00378 & 0.00089 \\
+\multicolumn{2}{@{}l}{SD among unrelated}     & 0.00330 & 0.00616 & 0.00617 & \textbf{0.00345} & 0.00035 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The whole difference is one post-hoc correction}
+
+The first run of this comparison used a re-implementation of Equation~\eqref{eq:pcrelate} rather than
+GENESIS, and produced the ``corr.\ off'' column: attenuation of 3--17\% and unrelated pairs sitting at
+$-0.0055$ instead of $0$. The real \texttt{pcrelate()} does not do that. Tracking down why turned out to be
+the most informative result here.
+
+It is not the individual allele frequencies. GENESIS computes $\hat\mu = \tfrac12 V(V^{\!\top}V)^{-1}V^{\!\top}G$
+(functions \texttt{.calcISAFBeta}, \texttt{.estISAF}) --- an ordinary hat-matrix regression, exactly as
+re-implemented. Substituting GENESIS's own PCs changes nothing (unrelated mean $-0.0053$), and its default
+\texttt{maf.bound.method = "filter"}, which drops the 20.4\% of sites where some individual's fitted
+$\hat\mu$ leaves the MAF range, changes nothing either ($-0.0055$).
+
+The difference is \textbf{\texttt{correctKin}}, enabled by the default \texttt{small.samp.correct = TRUE}.
+For each PC $k$, it regresses the kinship estimates on the entries of $V_kV_k^{\!\top}$, fits that line using
+\emph{only} pairs with $\hat\phi<2^{-11/2}\approx0.022$ --- i.e.\ the effectively unrelated ones --- and
+subtracts it from every pair. Running \texttt{pcrelate()} with \texttt{small.samp.correct = FALSE} reproduces
+the re-implementation at a correlation of $\mathbf{1.0000}$, with the unrelated mean identical to five
+decimals ($-0.00545$) and the same RMSE ($0.00824$).
+
+So the raw estimator of Equation~\eqref{eq:pcrelate} \emph{is} biased downward, for the reason given under
+choice (iii): the pair's own genotypes sit inside $\hat\pi$, the PCs are partly fitted to the relatedness
+being measured, and the residuals shrink. PC-Relate does not avoid this --- it measures the bias on the
+unrelated pairs and subtracts it afterwards. The correction is worth a factor of $2.5$ in RMSE
+($0.00824 \to 0.00331$) and it is what makes PC-Relate competitive.
+
+This also settles the status of PCAngsd's kinship precisely. It implemented
+Equation~\eqref{eq:pcrelate} and nothing else --- no \texttt{correctKin}. Its behaviour is therefore the
+``corr.\ off'' column, which is why that column and PCAngsd's agree to within $3\times10^{-4}$.
+\emph{PCAngsd's kinship was PC-Relate's estimator without PC-Relate's correction.}
+
+\subsection{Four ways to run evalAdmix}
+
+evalAdmix's residual-correlation statistic can be reached by four routes, differing in how the mean structure
+is fitted and how the self-contribution is removed. The fourth is the PCAone \texttt{-{}-evaladmix}
+implementation of Section~5.1; all four were run on the same data.
+
+\begin{center}
+\scriptsize
+\begin{tabular}{@{}l cccc@{}}
+\toprule
+ & \textbf{ADMIXTURE} & \textbf{ADMIXTURE} & \textbf{PCA ($K{-}1$)} & \textbf{PCAone} \\
+ & \textbf{+ EM} & \textbf{+ projection} & \textbf{+ projection (R)} & \textbf{\texttt{-{}-evaladmix}} \\
+\midrule
+Fits mean structure with & $Q,F$ & $Q$ & $K{-}1$ PCs $+$ int. & $K{-}1$ PCs $+$ int. \\
+Removes self by & leave-one-out & $\hat b-\hat c$ & $\hat b-\hat c$ & $\hat b-\hat c$ \\
+Passes over data & \texttt{-nIts} per ind. & single & single & single \\
+Holds genotypes in RAM & yes & yes & yes & \textbf{no} \\
+Clips to $[-1,1]$ & --- & no & no & \textbf{yes} \\
+\textbf{Needs ADMIXTURE} & \textbf{yes} & \textbf{yes} & \textbf{no} & \textbf{no} \\
+\midrule
+correlation with truth   & 0.9883 & 0.9883 & 0.9880 & 0.9878 \\
+RMSE, related            & 0.00292 & 0.00429 & 0.00443 & \textbf{0.00251} \\
+\emph{same, all clipped} & \emph{0.00292} & \emph{0.00255} & \emph{0.00251} & \emph{0.00251} \\
+RMSE, related excl.\ dup.& 0.00320 & 0.00279 & \textbf{0.00275} & \textbf{0.00275} \\
+SD among unrelated       & \textbf{0.00345} & 0.00349 & 0.00354 & 0.00353 \\
+mean, unrelated          & $-0.00156$ & $-0.00154$ & $-0.00155$ & $-0.00155$ \\
+mean, duplicates         & \textbf{0.5000} & 0.5079 & 0.5083 & \textbf{0.5000} \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{attenuation, estimate/truth}} \\
+\quad duplicate         & \textbf{1.000} & 1.016 & 1.017 & \textbf{1.000} \\
+\quad parent--offspring & 0.990 & 0.998 & \textbf{0.999} & \textbf{0.999} \\
+\quad full sib          & 0.985 & 0.990 & \textbf{0.990} & \textbf{0.990} \\
+\quad half sib          & 0.979 & 0.981 & \textbf{0.982} & \textbf{0.982} \\
+\quad first cousin      & 0.992 & 0.994 & \textbf{0.995} & \textbf{0.995} \\
+\quad second cousin     & \textbf{1.134} & 1.135 & 1.136 & 1.136 \\
+\midrule
+runtime, this dataset & 6\,s wall & 22\,s wall & 2.2\,s & \textbf{0.76\,s wall} \\
+                      & 93\,s CPU (20 thr.) & 21\,s CPU (1 thr.) & (R, 1 thr.) & \emph{0.12\,s of which} \\
+                      &  &  &  & \emph{is the statistic} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textbf{Accuracy is essentially identical across all four} --- correlations with truth differ in the fourth
+decimal. The apparent RMSE spread in the first row is almost entirely the $[-1,1]$ clip: apply it uniformly
+(second row) and the three projection routes converge on $0.00251$--$0.00255$, with the EM route at
+$0.00292$. Excluding duplicates entirely, the projection routes sit at $0.00275$--$0.00279$ against EM's
+$0.00320$.
+
+\textbf{Where they genuinely differ is small and systematic.} The EM route is exactly right on duplicates by
+construction and is the tightest on unrelated pairs ($\mathrm{SD}=0.00345$); the projection routes are
+slightly better on every other class. All four overshoot identically at second cousins ($\approx1.135$),
+confirming that is a property of the statistic rather than of any front-end.
+
+\textbf{PCAone \texttt{-{}-evaladmix} combines the two advantages}: projection accuracy on the non-duplicate
+classes together with exact duplicates, because it applies the clip that the other projection routes leave
+to the user. That gives it the lowest as-shipped RMSE of the four ($0.00251$), though as the clipped row
+shows, this is a default rather than a better estimator.
+
+\textbf{The real differences are cost and dependencies.} The EM route refits $F$ with each individual
+excluded, \texttt{-nIts} times, so its work grows with sample size on top of the per-pair cost; the
+projection routes are single-pass. The two PCA routes need no ADMIXTURE run at all --- invisible here,
+because the \texttt{.P}/\texttt{.Q} files ship with the data, but usually the dominant cost of a real
+analysis. And only the PCAone implementation avoids holding the genotype matrix in RAM, which is what makes
+the approach usable at biobank scale; on this dataset the statistic itself costs $0.12$\,s on top of a PCA
+that was going to be run anyway.
+
+\textbf{Recommendation:} \texttt{PCAone -b plink -k <K-1> -{}-evaladmix}. It needs no admixture model, adds
+almost nothing to a PCA, scales out-of-core, and matches or beats the alternatives on every relationship
+class except the second-cousin overshoot that all four share.
+
+\subsection{Improving the PCA route}
+
+If the PCA $+$ projection route is the one you want, four knobs are worth knowing about. Only two of them
+matter, and one matters enormously.
+
+\paragraph{1. Use exactly $K-1$ PCs. This dominates everything else.}
+Scanning the number of PCs, with all else fixed:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+PCs used & $k=1$ ($=K{-}1$) & $k=2$ & $k=3$ & $k=4$ \\
+\midrule
+RMSE (related pairs) & \textbf{0.00443} & 0.03035 & 0.05001 & 0.06917 \\
+mean at duplicates ($\phi=0.5$) & \textbf{0.508} & 0.541 & 0.579 & 0.620 \\
+correlation with truth & \textbf{0.988} & 0.947 & 0.891 & 0.830 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+One PC too many costs a factor of seven in RMSE. The reason is that with $K=2$ genuinely distinct
+populations there is only one real ancestry axis; PC2 onward are fitting \emph{relatedness}, not ancestry, and
+projecting them out distorts the residual structure the estimator depends on. What actually has to match is
+the \emph{dimension} of the projection: \texttt{method="standard"} appends an intercept row, so $K-1$ PCs
+span a $K$-dimensional space, the same as $Q$. Chen \& Storey normalisation (\texttt{method="CS"}) has no
+intercept row and therefore needs $k=K$; run at $k=K-1$ it collapses (RMSE $0.0172$, $r=0.67$). Get the
+dimension right and the normalisation label barely matters; get it wrong and nothing else can save you.
+
+\paragraph{2. Cap at the parameter bound.} A correlation cannot exceed $1$, so $\phi\le 0.5$; but
+$\hat b-\hat c$ is unconstrained and overshoots, returning $0.508$ for duplicates. Truncating at the bound is
+as principled as RelateAdmix's simplex constraint and costs nothing:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+ & RMSE, related & RMSE, related \emph{excluding} duplicates & duplicates \\
+\midrule
+PCA $+$ projection            & 0.00443 & 0.00275 & 0.5083 \\
+\quad $+$ cap at $\phi=0.5$   & \textbf{0.00251} & 0.00275 & \textbf{0.5000} \\
+PCA on unrelated subset       & 0.00415 & 0.00269 & 0.5077 \\
+\quad $+$ cap                 & \textbf{0.00246} & \textbf{0.00269} & \textbf{0.5000} \\
+\midrule
+\emph{evalAdmix, ADMIXTURE $+$ EM} & 0.00292 & 0.00320 & 0.5000 \\
+\emph{PC-Relate}                   & 0.00358 & 0.00353 & 0.4972 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Note the second column carefully. \textbf{Excluding duplicates, the untuned PCA route was already the best
+method in this comparison} ($0.00275$, against evalAdmix's $0.00320$ and PC-Relate's $0.00353$). Its entire
+apparent deficit in Section~4.2 was ten duplicate pairs breaking a bound. Capping is free and correct, but it
+changes nothing unless duplicates are present --- and duplicates are usually removed from real analyses
+anyway.
+
+\paragraph{3. Compute the PCs on an unrelated subset and project the rest in.} This is the PC-AiR idea
+applied to evalAdmix. The analytic $\hat b-\hat c$ correction handles the \emph{geometry} of the projection,
+but not the fact that the PCs themselves were fitted partly to the relatedness being measured. Restricting
+the eigendecomposition to a maximal unrelated set (66 of 126 individuals here) and projecting everyone onto
+those loadings improves every class slightly. Judged on the 50 related non-duplicate pairs, where the cap
+plays no role, RMSE goes from $0.00275$ to $0.00269$ --- \textbf{2.3\%}. That gain is statistically real
+(paired $t$ on squared errors $p=0.013$; bootstrap 95\% CI for the RMSE difference
+$[2\times10^{-5},\,1.1\times10^{-4}]$, excluding zero; the unrelated-subset version wins in 99.9\% of 10{,}000
+bootstrap resamples) but it is practically negligible. And this dataset is an extreme case, with nearly half
+the sample sitting in a related pair; expect less in a cohort with few relatives. In practice you would
+iterate: run once, identify relatives, recompute the PCs without them. Worth doing if it is cheap; not worth
+restructuring a pipeline for.
+
+\paragraph{4. Normalisation and MAF threshold: do not bother.} Centring only versus centring and scaling
+versus Chen \& Storey (each at its correct dimension) give RMSE $0.00443$, $0.00441$ and $0.00444$; MAF
+thresholds of $0.01$ and $0.05$ are indistinguishable. These are 1\% effects.
+
+\paragraph{What is left --- and the honest summary.} After all of this the PCA route still overshoots at
+second cousins by $\approx13\%$, and so do both ADMIXTURE routes by the same amount. That is a property of
+the statistic where the signal approaches the noise floor, not of the front-end, and none of these knobs
+touches it.
+
+\textbf{So no better approach was found.} Of the four knobs, one (the number of PCs) is a guardrail rather
+than an improvement --- it can only make things much worse if set wrong; two (normalisation, MAF) do nothing;
+the cap corrects a bound violation that affects duplicates alone; and the unrelated-subset PCA buys 2.3\%.
+Run at $K-1$ PCs, \textbf{PCA $+$ projection was already the most accurate method in this entire comparison}
+once duplicates are set aside ($0.00275$, against evalAdmix EM's $0.00320$, PC-Relate's $0.00353$ and
+RelateAdmix's $0.00812$). The right conclusion is not that it needs improving, but that it was already
+winning and the earlier tables obscured that.
+
+\paragraph{Recommended recipe.}
+\begin{tightitem}
+  \item Choose $K$; use $K-1$ PCs with \texttt{method="standard"} (or $K$ with \texttt{"CS"}).
+  \item Run once on all individuals; identify related pairs; recompute the PCs on an unrelated subset and
+  project everyone in; re-run.
+  \item Truncate the resulting correlations to $[-1,1]$ before halving to the $\phi$ scale.
+  \item Do not spend time on normalisation or MAF thresholds.
+\end{tightitem}
+
+\subsection{What each method gets right}
+
+Expressed as estimate/truth:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+ & duplicate & parent--offs. & full sib & half sib & 1st cousin & 2nd cousin \\
+\midrule
+PC-Relate (default)   & 0.994 & 1.001 & 0.988 & 1.014 & 1.044 & 1.283 \\
+PC-Relate (corr.\ off) / PCAngsd & 0.972 & 0.956 & 0.964 & 0.959 & 0.903 & 0.847 \\
+evalAdmix             & 1.000 & 0.990 & 0.985 & 0.979 & 0.992 & 1.134 \\
+RelateAdmix           & 1.000 & 1.000 & 0.976 & 0.886 & 0.842 & 0.740 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+PC-Relate and evalAdmix are both close to unbiased down to first cousins and both overshoot at second
+cousins, where the signal approaches the noise floor. The uncorrected estimator attenuates monotonically with
+distance. RelateAdmix shows the opposite pattern: exact for the closest classes, and attenuating hardest for
+the most distant.
+
+\subsection{A warning about overall RMSE --- and about RelateAdmix}
+
+The RMSE column in the main table is misleading, and the way it misleads is worth spelling out.
+\textbf{99.24\% of the 7{,}875 pairs are unrelated}, so an RMSE computed over all pairs is very nearly a
+measurement of performance on unrelated pairs alone. Splitting it:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+ & \textbf{RMSE, all} & \textbf{RMSE, unrelated} & \textbf{RMSE, related} & \textbf{bias, related} \\
+ & (7875 pairs) & (7815) & \textbf{(60)} & \\
+\midrule
+RelateAdmix              & \textbf{0.00089} & \textbf{0.00054} & 0.00812 & $-0.00571$ \\
+PC-Relate                & 0.00331 & 0.00330 & 0.00358 & $+0.00055$ \\
+evalAdmix (EM)           & 0.00378 & 0.00378 & 0.00292 & $-0.00120$ \\
+PCA $+$ projection       & 0.00387 & 0.00386 & 0.00443 & $+0.00084$ \\
+PCAone \texttt{-{}-evaladmix} & 0.00385 & 0.00386 & \textbf{0.00251} & $-0.00055$ \\
+PC-Relate (corr.\ off)   & 0.00824 & 0.00823 & 0.00989 & $-0.00842$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textbf{The ranking inverts.} On the 60 pairs that actually have relatedness to estimate, PCAone's
+\texttt{-{}-evaladmix} is best ($0.00251$), then evalAdmix's EM route ($0.00292$), then PC-Relate
+($0.00358$) --- and \textbf{RelateAdmix is the worst} ($0.00812$), more than three times the best. The two
+evalAdmix rows differ only in the $[-1,1]$ clip and the front-end; see Section~4.2. Per class it is the worst method
+at half sibs ($0.0152$) and first cousins ($0.0100$), consistent with the attenuation ratios of $0.886$ and
+$0.842$ above.
+
+\textbf{Why its unrelated RMSE is so small is a constraint, not precision.} RelateAdmix is a constrained ML
+estimator: $(k_0,k_1,k_2)$ must lie on the simplex, so $\phi\ge0$ by construction. Among the 7{,}815
+unrelated pairs it never returns a negative value (range $[0,\,0.00384]$) and 93.6\% have
+$\hat k_1<10^{-3}$ --- the estimates are pinned at the boundary. PC-Relate, an unconstrained moment-style
+estimator, scatters symmetrically about zero (range $[-0.0165,\,+0.0120]$). Pinning at the truth is not the
+same as estimating it well; it happens to be right here because the truth for those pairs \emph{is} the
+boundary.
+
+The same effect explains RelateAdmix's exactness at the other two boundary classes: duplicates
+($k_2=1$) and parent--offspring ($k_1=1$) are simplex vertices, and it returns $0.00000$ RMSE at both.
+Its errors are concentrated entirely in the interior --- full sibs, half sibs, cousins --- where no
+constraint helps.
+
+\textbf{What this means in practice.} RelateAdmix is excellent at the question ``which pairs are related at
+all?'' --- essentially no false positives, and exact on duplicates and parent--offspring. It is the
+\emph{least} accurate of these methods at the question ``how related are these two?'' for anything between
+full sibs and second cousins. Which one you care about should decide the method, and an overall RMSE will not
+tell you.
+
+\subsection{And the IBD probabilities}
+
+PC-Relate's $(k_0,k_1,k_2)$, which neither of the other two produces, recover the pedigree cleanly:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+& \multicolumn{3}{c}{\textbf{estimated}} & \multicolumn{3}{c}{\textbf{expected}} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+\textbf{Relationship} & $\hat k_0$ & $\hat k_1$ & $\hat k_2$ & $k_0$ & $k_1$ & $k_2$ \\
+\midrule
+duplicate         & 0.000 & 0.021 & 0.979 & 0 & 0 & 1 \\
+parent--offspring & 0.000 & 1.000 & 0.000 & 0 & 1 & 0 \\
+full sib          & 0.255 & 0.502 & 0.243 & 0.25 & 0.50 & 0.25 \\
+half sib          & 0.495 & 0.502 & 0.002 & 0.50 & 0.50 & 0 \\
+first cousin      & 0.738 & 0.263 & $-0.001$ & 0.75 & 0.25 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+This is the concrete payoff of Section~6. Parent--offspring and full sibs both have $\phi=1/4$, and indeed
+PC-Relate's kinship gives 0.2503 and 0.2470 --- indistinguishable. The IBD probabilities separate them
+completely: $k_0=0.000,\,k_1=1.000$ versus $k_0=0.255,\,k_1=0.502,\,k_2=0.243$. No kinship-only method can
+do this.
+
+\section{Which one is best?}
+
+\textbf{There is no single ordering, and any claim of one should be treated with suspicion} --- including
+the obvious one. PC-Relate has the lower \emph{overall} RMSE ($0.00331$ vs evalAdmix's $0.00378$), but that
+is the statistic Section~4.4 warns against: 99.24\% of pairs are unrelated, so it mostly measures
+performance on unrelated pairs. Split it and the two swap places depending on the question:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+ & \textbf{PC-Relate} & \textbf{evalAdmix (EM)} & \textbf{PCAone \texttt{-{}-evaladmix}} \\
+\midrule
+RMSE on unrelated pairs (7815) & \textbf{0.00330} & 0.00378 & 0.00386 \\
+RMSE on related pairs (60)     & 0.00358 & 0.00292 & \textbf{0.00251} \\
+returns $(k_0,k_1,k_2)$        & \textbf{yes} & no & no \\
+dimensionality to choose       & \# PCs & $K$ & $K{-}1$ PCs \\
+assumes \emph{discrete} ancestry & \textbf{no} & yes & \textbf{no} \\
+needs an ADMIXTURE run         & \textbf{no} & yes & \textbf{no} \\
+holds genotypes in RAM         & yes & yes & \textbf{no} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+PC-Relate is better at \emph{``are these two unrelated?''}; the two evalAdmix routes are better at
+\emph{``how related are they?''}, with the PCAone implementation best of all on related pairs. No margin is
+large --- all three correlate with the truth at $0.988$ --- and none is the deciding factor in practice.
+
+What actually separates them is not accuracy at all, but the lower half of that table. PC-Relate is the only
+one returning $(k_0,k_1,k_2)$ and inbreeding coefficients. PCAone's \texttt{-{}-evaladmix} is the only one
+that needs no admixture run and never holds the genotype matrix in RAM, which is what decides whether the
+analysis is possible at all at biobank scale. PCAngsd's kinship no longer exists. These are categorical
+differences, and they should drive the choice where a difference in the fourth decimal of an RMSE should
+not.
+
+\paragraph{PC-Relate does not escape the dimensionality choice.} It is tempting to say PC-Relate ``needs no
+$K$'', and in one sense it does not: PCs do not assume discrete ancestral populations, so continuous
+ancestry is handled without pretending otherwise. But the number of PCs entering the regression still has to
+be chosen, and that is the same decision wearing different clothes --- with the same sensitivity. Running
+\texttt{pcrelate()} on these data with one to four PCs, where $K=2$ makes one correct:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+PCs used & 1 (correct) & 2 & 3 & 4 \\
+\midrule
+PC-Relate, RMSE on related pairs & \textbf{0.00358} & 0.03474 & 0.06011 & 0.09459 \\
+\quad mean at duplicates ($\phi=0.5$) & \textbf{0.4972} & 0.5395 & 0.5880 & 0.6561 \\
+\quad correlation with truth & \textbf{0.9891} & 0.9747 & 0.9535 & 0.9319 \\
+\midrule
+\emph{PCA $+$ projection, for comparison} & \emph{0.00443} & \emph{0.03035} & \emph{0.05001} & \emph{0.06917} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+One PC too many costs a factor of ten, and PC-Relate degrades slightly \emph{faster} than the projection
+route it is being compared against. Notably the damage is concentrated in the closest pairs --- duplicates
+inflate to $0.66$ while parent--offspring stays at $0.251$ and first cousins at $0.066$ --- so it will not
+announce itself in a summary statistic. The real advantage of the PC route is the discreteness assumption it
+avoids, not a decision it saves you. A decision rule:
+
+\begin{tightitem}
+  \item \textbf{Called genotypes, general use: PC-Relate.} Not because it is the most accurate --- it is
+  not, on related pairs --- but because it is complete: inbreeding
+  coefficients, and the only IBD probabilities on offer. Keep \texttt{small.samp.correct = TRUE} --- it is
+  the default, it is doing most of the work, and it requires all samples in one block.
+  \item \textbf{You need to tell parent--offspring from full sibs: PC-Relate, necessarily.} $\phi=1/4$ for
+  both; only $k_0$ separates them.
+  \item \textbf{evalAdmix} is a close second on $\phi$ (and the best of all on duplicates, exactly $0.5$),
+  needs no unrelated set and no leverage correction because leave-one-out removes the problem at source
+  rather than after the fact. Use it when you have a defensible $K$, when you want the model-fit diagnostic
+  in the same run, or as a cross-check on PC-Relate. Remember it returns $2\phi$.
+  \item \textbf{Large samples, or you would rather not run ADMIXTURE: PCAone
+  \texttt{-{}-evaladmix}} (Section~5). Same statistic as the evalAdmix projection route, but the mean
+  structure comes from $K-1$ PCs, and the single-pass formulation means the genotype matrix never has to fit
+  in RAM. It was the most accurate on related pairs here ($0.00251$), it costs $0.12$\,s on top of a PCA you
+  were running anyway, and it applies the $\phi\le0.5$ truncation by default. Like the other evalAdmix
+  routes it returns $2\phi$ and no IBD probabilities.
+  \item \textbf{Ancestry not discrete: PC-Relate or the PCA route}, neither of which assumes discrete
+  source populations. This does \emph{not} excuse you from choosing the number of axes --- see above.
+  \item \textbf{Low depth: none of the three.} PCAngsd's kinship is gone, and as shown it lacked the
+  correction that makes PC-Relate work. Use PCAngsd or NGSadmix for $\hat\pi$ / $\hat q,\hat f$, then
+  NGSremix --- ML, genotype likelihoods, and it returns $(k_0,k_1,k_2)$.
+  \item \textbf{For screening --- ``is this pair related at all?'' --- RelateAdmix.} Its constrained ML
+  never returns a negative $\phi$ and pins unrelated pairs at zero (RMSE $0.00054$ there), so false positives
+  are essentially absent, and it is exact on duplicates and parent--offspring. But see Section~4.4: on the
+  related pairs themselves it is the \emph{worst} of these methods (RMSE $0.00812$ vs evalAdmix's
+  $0.00292$), badly attenuated at half sibs and cousins. Do not read its low overall RMSE as accuracy.
+  \item \textbf{Trap:} if you run evalAdmix to choose $K$, close relatives appear as model misfit. Remove
+  relatives first, or read the outliers as relatedness.
+\end{tightitem}
+
+\noindent
+\emph{Scope.} This dataset has discrete, well-separated ancestral populations with $K$ known to be correct,
+$n=126$, and no missing data. Small $n$ is exactly the regime \texttt{correctKin} was written for, so its
+contribution would be smaller in a biobank; and where ancestry is continuous or $K$ is wrong, $\hat\pi$ from
+the admixture model degrades while $\hat\pi$ from PCs does not.
+
+\section{How PC-Relate computes $(k_0,k_1,k_2)$}
+\label{sec:ibd}
+
+Since PC-Relate is the only one of the three that does this, it is worth spelling out. What follows is the
+GENESIS implementation (\texttt{pcrelate}, \texttt{ibd.probs = TRUE}), read from source.
+
+\paragraph{$k_2$ from a dominance coding.} Define
+\begin{equation*}
+D_{is}=\begin{cases}\hat\mu_{is} & g_{is}=0\\[1pt] 0 & g_{is}=1\\[1pt] 1-\hat\mu_{is} & g_{is}=2\end{cases}
+\qquad
+\tilde D_{is}=D_{is}-\hat\mu_{is}(1-\hat\mu_{is}),
+\end{equation*}
+so that $E[\tilde D_{is}]=0$ under HWE. The dominance covariance between two individuals is proportional to
+$k_2$ alone --- it vanishes for IBD-1 sharing --- so
+\begin{equation*}
+\hat k_2=\frac{\sum_s \tilde D_{is}\tilde D_{js}}
+{\sum_s \hat\mu_{is}(1-\hat\mu_{is})\,\hat\mu_{js}(1-\hat\mu_{js})}.
+\end{equation*}
+
+\paragraph{$k_0$ from opposing homozygotes.} If a pair shares \emph{any} allele IBD at a site they cannot be
+opposing homozygotes. So observed IBS0, over its expectation if the pair shared nothing, estimates $k_0$:
+\begin{equation*}
+\hat k_0=\frac{\sum_s\left[\mathbf{1}(g_{is}{=}2,g_{js}{=}0)+\mathbf{1}(g_{is}{=}0,g_{js}{=}2)\right]}
+{\sum_s\left[\hat\mu_{is}^{2}(1-\hat\mu_{js})^{2}+(1-\hat\mu_{is})^{2}\hat\mu_{js}^{2}\right]}.
+\end{equation*}
+
+\paragraph{$k_1$ by subtraction.} $\hat k_1=1-\hat k_0-\hat k_2$. GENESIS stores \texttt{kin}, \texttt{k0}
+and \texttt{k2}; $k_1$ is left as the remainder.
+
+\medskip\noindent
+\textbf{So it does not go from kinship to IBD probabilities.} $\hat\phi$, $\hat k_0$ and $\hat k_2$ are three
+separate statistics computed from the same residuals, and the identity $\phi=k_1/4+k_2/2$ is not used to
+derive them. That is deliberate: it is precisely because $\phi$ cannot distinguish parent--offspring from
+full sibs that $k_0$ needs its own estimator, and the IBS0 count is what supplies it ($k_0=0$ versus
+$k_0=1/4$).
+
+\paragraph{Three corrections, applied only when IBD probabilities are requested.}
+\begin{tightitem}
+  \item \emph{Inbreeding.} HWE departure inflates the dominance covariance, so the product of the two
+  individuals' inbreeding coefficients is subtracted: $\hat k_2\leftarrow\hat k_2-\hat f_i\hat f_j$.
+  \item \emph{Residual ancestry and kinship bias in $\hat k_2$.} For each PC $k\ge2$, regress the current
+  $\hat k_2$ on the entries of $V_kV_k^{\!\top}$ with linear and quadratic terms, fitting only on pairs with
+  $\hat\phi<2^{-11/2}\approx0.022$, and subtract the fit. Then regress on $\hat\phi$ itself, fitting on pairs
+  with $\hat k_2<2^{-9/2}\approx0.044$, and subtract that too.
+  \item \emph{$k_0$ for distant pairs --- where the kinship identity finally enters.} For pairs below the
+  first-degree boundary, $\hat\phi<2^{-5/2}\approx0.177$, the IBS0 estimate is discarded and replaced by
+  \begin{equation*}
+  \hat k_0=1-4\hat\phi+\hat k_2,
+  \end{equation*}
+  which is $\phi=k_1/4+k_2/2$ with $k_1=1-k_0-k_2$, rearranged. In distant pairs the IBS0 count is dominated
+  by noise and genotyping error while $\hat\phi$ remains well estimated; in first-degree pairs the IBS0
+  estimator is kept, for the reason above.
+\end{tightitem}
+
+\section{Running this with PCAone}
+
+\subsection{Is there an implementation? No.}
+
+PCAone has no evalAdmix, model-fit or kinship feature --- its only relatedness-adjacent output is
+\texttt{-{}-inbreed}. PCAngsd's kinship was removed in 2021. The only existing implementations of the
+residual-correlation statistic are the \texttt{evalAdmix} C++ program, which projects onto $Q$ and so needs an
+admixture run, and the \texttt{evalPCA()} R code in \texttt{popgenDK/evalPopStructure}, which handles PCA but
+holds the whole genotype matrix in memory.
+
+\subsection{But PCAone already computes the expensive part}
+
+PCAone's \texttt{-D/-{}-ld} flag, added for ancestry-adjusted LD, writes a \texttt{.residuals} file that is
+precisely $G$ minus its rank-$k$ fit (\texttt{Data.cpp}: \texttt{G -= U * S.asDiagonal() * VT}) --- the
+residual matrix the estimator needs. Two things had to be checked, and both hold: the residuals are written
+on the \emph{raw} genotype scale, agreeing with residuals computed from unstandardised genotypes to
+$1.2\times10^{-7}$ and not with standardised ones (which would differ by $4.5\times10^{-3}$); and the rank-$k$
+fit of column-centred data spans the same $K$ dimensions as $k=K-1$ PCs plus an intercept, so
+\texttt{-k <K-1>} is the right setting.
+
+\paragraph{Post-hoc recipe.} Run PCAone, then compute $\hat b-\hat c$ from its outputs:
+\begin{quote}\ttfamily\small
+PCAone -b plink -k <K-1> -d 0 -D -{}-maf 0.05 -o out\\
+Rscript evalAdmix\_pcaone.R out plink <K-1>
+\end{quote}
+Reading \texttt{out.residuals} (\texttt{uint32} $M$, \texttt{uint32} $N$, then $M\times N$ \texttt{float32},
+SNP-major) and \texttt{out.eigvecs}:
+\begin{equation*}
+\hat b = \operatorname{cor}(R),\qquad
+\hat c = \operatorname{cov2cor}\!\big((\mathbf{I}-\mathbf{P})\hat{\mathbf{D}}(\mathbf{I}-\mathbf{P})\big),
+\qquad \hat\phi = (\hat b-\hat c)/2,
+\end{equation*}
+with $\mathbf{P}$ the projection onto $[\text{PC}_1\ldots\text{PC}_{K-1},\,\mathbf 1]$ and
+$\hat{\mathbf D}$ the diagonal of per-individual mean heterozygosity $\overline{g(2-g)}$. This reproduces
+\texttt{evalPCA()} at $r=1.00000$ with a maximum absolute difference of $5.9\times10^{-8}$ --- float
+precision. Total cost beyond the PCA: one pass to read the residual file.
+
+\subsection{Implemented: \texttt{-{}-evaladmix} in PCAone}
+
+The algorithm above is implemented in PCAone as \texttt{-{}-evaladmix}
+(\texttt{src/EvalAdmix.cpp}, \texttt{src/EvalAdmix.hpp}, wired through \texttt{Cmd} and \texttt{Main}) and is
+published at \texttt{github.com/aalbrechtsen/PCAone}, together with the three bug fixes described below:
+
+\begin{quote}\ttfamily\small
+PCAone -b plink -k <K-1> -{}-evaladmix -{}-maf 0.05 -o out
+\end{quote}
+
+\noindent
+It writes \texttt{out.corres} (the $N\times N$ correlation of residuals) and \texttt{out.kinship}
+($\text{corres}/2$), both with sample IDs from the \texttt{.fam}. \texttt{-{}-evaladmix-k} selects how many
+of the computed PCs enter the projection, so one run can produce many PCs for other purposes while the
+statistic uses $K-1$.
+
+\paragraph{Validation.} Against the \texttt{evalPCA()} reference on the RelateAdmix test data:
+$r=0.999955$, and identical RMSE on related non-duplicate pairs ($0.00275$ both). The only entries differing
+by more than $1.6\times10^{-4}$ are the ten duplicate pairs, where the implementation applies the
+$[-1,1]$ clip of Section~4.3 and the R reference does not. In-core and out-of-core runs, and
+\texttt{-{}-evaladmix-k 1} against a \texttt{-k 1} run, agree exactly (max difference $0$).
+Recovered means: duplicates $0.5000$, parent--offspring $0.2496$, full sibs $0.2475$, half sibs $0.1227$,
+first cousins $0.0622$, unrelated $-0.0016$.
+
+\paragraph{Implementation notes.} Three things needed care.
+\begin{tightitem}
+  \item \emph{Genotype scale.} PCAone codes genotypes as $\{0,\tfrac12,1\}$ (\texttt{BED2GENO}), i.e.\ $g/2$.
+  Because $\hat b$ and $\hat c$ are each separately converted to correlations, the constant factor cancels
+  and no rescaling is needed.
+  \item \emph{Centring.} The out-of-core block reader always returns centred genotypes, ignoring
+  \texttt{params.center}. This is harmless for $A$ and $\bar g$ --- per-site centring subtracts $c_s\mathbf 1$
+  from column $s$, and every resulting term carries a factor $(\mathbf I-\mathbf P)\mathbf 1=\mathbf 0$
+  because the projection contains the intercept --- but it does corrupt the heterozygosity, which is
+  therefore recovered as $x = G_{\text{centred}} + \hat f_s$. The in-core path runs with
+  \texttt{center = false} and needs no correction.
+  \item \emph{The PC scores could not be read correctly.} \texttt{Utils::read\_usv()} was returning a
+  transposed matrix for any file with more than one column --- see below. It is now fixed, and this module
+  uses it.
+\end{tightitem}
+
+\paragraph{Limitations.} PLINK/PGEN input only; \texttt{-{}-maf} with out-of-core is rejected by PCAone
+itself, unrelated to this feature; and complete data is assumed, as above. Plain PCA and \texttt{-D} runs are
+unaffected.
+
+\subsection{Three bugs found along the way}
+
+Building the feature surfaced three pre-existing defects in PCAone, all now fixed and documented in the
+repository's \texttt{docs/} directory. The first is much the most consequential.
+
+\paragraph{1. \texttt{read\_usv()} transposes any multi-column matrix.} The parser fills a flat buffer row by
+row, then returned \texttt{Eigen::Map<Mat2D>(V.data(), j, k)} --- and \texttt{Mat2D} is column-major. Mapping
+a row-major buffer as column-major scrambles the contents, equivalent to reading the transpose. It is correct
+only when there is one column, which is why it went unnoticed.
+
+The victim is not this module but \textbf{the ancestry-adjusted LD path}, \texttt{LD.cpp:493}, which builds
+the projector $UU^{\!\top}$ from the result. With $k>1$ the residuals --- and therefore every $R^2$, pruning
+and clumping result --- were computed against the wrong subspace. Building both versions and running the
+affected path on the test data with $K=2$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+finite SNP pairs compared & 4{,}611{,}432 \\
+$R^2$ values that differ & 4{,}609{,}439 \ (\textbf{99.96\%}) \\
+correlation between old and new $R^2$ & \textbf{0.694} \\
+mean $R^2$ & $0.01240 \rightarrow 0.01014$ \\
+largest single change & $0.2556 \rightarrow 0.0329$ \\
+\midrule
+pairs with $R^2>0.2$ & 370 (old) $\rightarrow$ 58 (new) \\
+flagged by old but not new & 322 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The old code systematically inflates LD, and at \texttt{-{}-ld-r2 0.2} would prune roughly six times as many
+pairs as it should. $R^2$ recomputed independently in R for the six most-affected pairs agrees with the fixed
+version exactly in every case, confirming which side is correct.
+
+\paragraph{2. Zero-variance variants give \texttt{NaN} $R^2$.} The LD routines begin from
+$1/\texttt{calc\_sds}(G)$. A monomorphic variant, or one lying entirely in the span of the PCs being adjusted
+for, has $\mathrm{sd}=0$, so this is $\infty$; the correlation $0\cdot\infty$ is \texttt{NaN}, written to
+\texttt{.ld.gz} for every pair involving that variant. \texttt{calc\_sds()} already carried the comment
+\emph{``return 1e-9 when sd is 0''} --- the case was anticipated but the guard never written. On the test
+data 4 monomorphic variants of 104{,}290 produced 244 \texttt{-nan} rows. Zero-variance columns now yield
+$R^2=0$, which is what is true of a variant carrying no information, with a warning naming the count; all
+4{,}611{,}432 other values are bit-identical.
+
+\paragraph{3. A missing \texttt{.mbim} segfaults.} \texttt{read\_frq()} opened its file without checking, so
+a missing one read as empty, \texttt{F} stayed size zero, and the first \texttt{F(snp\_idx)} indexed out of
+bounds --- exit 139, no message. This is easy to reach because \texttt{-P/-{}-USV} points
+\texttt{filebim} at \texttt{<prefix>.mbim} and \emph{only} a run with \texttt{-D/-{}-ld} writes one, so a
+prefix from a plain PCA run looks valid and crashes. It now names the missing file and exits cleanly.
+
+\subsection{The derivation: why no residual file is needed}
+
+A direct implementation should not write residuals at all. Because $R=G(\mathbf{I}-\mathbf{P})$ and
+$\operatorname{cor}$ centres each individual's residuals across sites,
+\begin{equation}
+\tilde R^{\!\top}\tilde R=(\mathbf{I}-\mathbf{P})\big[G^{\!\top}G-M\,\bar g\,\bar g^{\!\top}\big](\mathbf{I}-\mathbf{P}),
+\qquad \hat b=\operatorname{cov2cor}(\tilde R^{\!\top}\tilde R),
+\label{eq:gram}
+\end{equation}
+so the statistic depends on the data only through three quantities:
+\begin{tightitem}
+  \item $G^{\!\top}G$, the $N\times N$ genotype Gram matrix;
+  \item $\bar g$, the per-individual mean genotype;
+  \item $\hat{\mathbf D}=\operatorname{diag}\big(\overline{g(2-g)}\big)$, per-individual mean heterozygosity.
+\end{tightitem}
+All three are simple accumulations over sites, computable in the \emph{same streaming pass} PCAone already
+makes, with no second pass, no residual file and no need to hold genotypes. Everything after the pass is
+$O(N^3)$ on $N\times N$ matrices. Verified numerically: Equation~\eqref{eq:gram} reproduces the direct
+residual computation to $10^{-15}$.
+
+This is a natural fit for PCAone's out-of-core design, and the marginal cost over a PCA it is doing anyway
+is one $O(MN^2)$ accumulation --- the same order as forming the covariance matrix it already builds. A
+reasonable interface would be a \texttt{-{}-evaladmix} flag emitting the $N\times N$ correlation-of-residuals
+matrix, with $k$ defaulting to $K-1$.
+
+\paragraph{Complete data assumed.} Everything in this section assumes no missing genotypes, which is the
+case for the data used here. That assumption is what makes the single-pass form exact: with missingness,
+evalAdmix skips sites absent in \emph{either} member of a pair, so each pair sees a different set of sites,
+$G^{\!\top}G$ ceases to be a sufficient summary, and one would have to accumulate pairwise site counts
+alongside it (or mean-impute, at the cost of shrinking the residuals). With complete data no such bookkeeping
+is needed and Equation~\eqref{eq:gram} holds exactly.
+
+\paragraph{The algorithm in full.} Given complete genotypes, $K$, and $k=K-1$ PCs:
+
+\begin{quote}\small
+\emph{One streaming pass over sites} $s=1\ldots M$, accumulating three objects:\\[2pt]
+\hspace*{1em}$A \mathrel{+}= g_s g_s^{\!\top}$ \hfill ($N\times N$; this is $G^{\!\top}G$)\\
+\hspace*{1em}$b \mathrel{+}= g_s$ \hfill ($N$; gives $\bar g = b/M$)\\
+\hspace*{1em}$d \mathrel{+}= g_s\odot(2-g_s)$ \hfill ($N$; gives $\hat{\mathbf D}=\operatorname{diag}(d/M)$)\\[4pt]
+\emph{Then, once:}\\
+\hspace*{1em}$\mathbf{P} = V(V^{\!\top}V)^{-1}V^{\!\top}$, \quad $V=[\,\mathrm{PC}_1\ldots\mathrm{PC}_k,\ \mathbf 1\,]$\\
+\hspace*{1em}$\hat b = \operatorname{cov2cor}\!\big((\mathbf I-\mathbf P)[A-M\bar g\bar g^{\!\top}](\mathbf I-\mathbf P)\big)$\\
+\hspace*{1em}$\hat c = \operatorname{cov2cor}\!\big((\mathbf I-\mathbf P)\hat{\mathbf D}(\mathbf I-\mathbf P)\big)$\\
+\hspace*{1em}$\hat\phi = \tfrac12\,\mathrm{clip}(\hat b-\hat c,\,-1,\,1)$
+\end{quote}
+
+\noindent
+The pass is $O(MN^2)$ --- the same order as the covariance matrix PCAone already forms --- and the tail is
+$O(N^3)$. Memory is $O(N^2)$, independent of the number of sites, so nothing about it conflicts with
+out-of-core operation. Two points of care remain: $\hat{\mathbf D}$ assumes Hardy--Weinberg within
+individuals, so inbred samples need attention; and the $\phi\le0.5$ truncation of Section~4.3 belongs on the
+output.
+
+\section{Methods: data and commands}
+
+\subsection{Data}
+
+No data were simulated for this note. The dataset is the example distributed \emph{with} RelateAdmix, in its
+\texttt{data/} directory, obtained by cloning the repository:
+
+\begin{quote}\ttfamily\small
+git clone https://github.com/aalbrechtsen/relateAdmix.git
+\end{quote}
+
+\noindent
+It consists of \texttt{smallPlink.\{bed,bim,fam\}} --- 126 individuals, 104{,}290 autosomal SNPs, no missing
+genotypes --- together with \texttt{smallPlink.2.P} (ancestral allele frequencies) and
+\texttt{smallPlink.2.Q} (admixture proportions), which are ADMIXTURE output for $K=2$ shipped alongside. Because
+those two files are provided, ADMIXTURE itself was never run; every method that needs $\hat q,\hat f$ used
+the same supplied files, so no method is advantaged by a better admixture fit.
+
+The individuals are simulated from two source populations with a known pedigree. The design is visible in
+the data --- individuals are ordered so that relatives are consecutive even--odd pairs --- and was read off
+directly: individuals 0--5 unrelated, 6--25 duplicates, 26--45 parent--offspring, 46--65 full sibs, 66--85
+half sibs, 86--105 first cousins, 106--125 second cousins, ten pairs per class. ``True $\phi$'' throughout is
+the \emph{theoretical} kinship for that relationship ($\tfrac12$, $\tfrac14$, $\tfrac14$, $\tfrac18$,
+$\tfrac1{16}$, $\tfrac1{64}$, and $0$ for the remaining 7{,}815 pairs), not any method's output.
+
+\subsection{Software and commands}
+
+\textbf{RelateAdmix} (commit as cloned above) --- C++ command-line build, \texttt{cp CPP\_Makefile Makefile \&\& make}:
+\begin{quote}\ttfamily\small
+./relateAdmix -plink smallPlink -f smallPlink.2.P -q smallPlink.2.Q -P 20
+\end{quote}
+5.4\,s wall, 100\,s CPU on 20 threads; output \texttt{output.k} with $(k_0,k_1,k_2)$ per pair.
+
+\medskip\noindent
+\textbf{evalAdmix} v1.0, cloned from \texttt{github.com/GenisGE/evalAdmix} and built with \texttt{make}. Both
+estimators were run, on the same PLINK files and the same \texttt{.P}/\texttt{.Q}:
+\begin{quote}\ttfamily\small
+\# default: leave-one-out frequency correction (-nIts 5)\\
+./evalAdmix -plink smallPlink -fname smallPlink.2.P -qname smallPlink.2.Q -P 20 -o corres.txt\\[4pt]
+\# van Waaij et al.\ analytic projection estimator\\
+./evalAdmix -plink smallPlink -fname smallPlink.2.P -qname smallPlink.2.Q -method corrected \textbackslash\\
+\hspace*{2em}-P 20 -o corres\_corrected.txt
+\end{quote}
+Default: 6\,s wall / 93\,s CPU (parallel over 20 threads). Corrected: 22\,s wall / 21.5\,s CPU --- fewer
+operations in total, single pass rather than \texttt{-nIts} refits, but effectively single-threaded, so it is
+slower in wall time at this sample size and would win as $n$ grows. Both write a $126\times126$ matrix of
+correlations of residuals; these were divided by $2$ to put them on the kinship scale. The two agreed closely
+(RMSE $0.00378$ vs $0.00382$), so the default estimator is quoted in the main table and the corrected one
+reported alongside.
+
+\medskip\noindent
+\textbf{evalAdmix, third route (PCA $+$ projection)} --- the R implementation from
+\texttt{github.com/popgenDK/evalPopStructure} (\texttt{R/evalPCA.R}), which applies the same $\hat b-\hat c$
+estimator to structure from PCA or from the admixture model:
+\begin{quote}\ttfamily\small
+pca <- makePCA(g, method="standard", center=TRUE, scale=FALSE)\\
+ePCA <- evalPCA(pca, k = K-1)\\[4pt]
+eADM <- evalPCA(list(method="admixture", g=g, Q=Q), k = K)
+\end{quote}
+with \texttt{g} the $102{,}185\times126$ SNP-by-individual genotype matrix. The admixture call reproduces the
+compiled \texttt{-method corrected} output at $r=1.00000$, confirming the two implementations agree.
+
+\medskip\noindent
+\textbf{PC-Relate} --- GENESIS 2.32.0, installed from Bioconductor
+(\texttt{BiocManager::install("GENESIS")}, pulling SNPRelate, GWASTools, gdsfmt, SeqArray, SeqVarTools).
+The PLINK files were converted with \texttt{SNPRelate::snpgdsBED2GDS()}; ancestry PCs came from
+\texttt{snpgdsPCA(maf=0.05, missing.rate=0.05)}; then
+\begin{quote}\ttfamily\small
+pcrelate(GenotypeBlockIterator(geno, snpBlock=20000),\\
+\hspace*{1em}pcs = pcs[,1,drop=FALSE], ibd.probs = TRUE, maf.thresh = 0.05)
+\end{quote}
+8.5\,s. One PC was used, matching $K=2$. Per the brief, PC-AiR was \emph{not} used --- the PCs come from
+plain PCA on all 126 individuals, so no unrelated training set is involved (\texttt{training.set = NULL}).
+The run was repeated with \texttt{small.samp.correct = FALSE} to isolate the contribution of
+\texttt{correctKin}.
+
+\medskip\noindent
+\textbf{PCAngsd} --- \emph{could not be run}, because the kinship estimator no longer exists: the
+\texttt{-kinship} flag and \texttt{kinship.py}/\texttt{kinship\_cy.pyx} were removed in January 2021
+(commit \texttt{3fda6ed}), and current v1.36 offers only inbreeding. Its formula was therefore read from the
+last version that shipped it (\texttt{git show a50c6af\^{}:kinship.py}) and confirmed to be
+Equation~\eqref{eq:pcrelate}. The ``PCAngsd'' column is that formula applied to these genotypes with
+$\hat\pi$ from a rank-1 SVD of the centred dosages --- which, as Section~4.1 shows, coincides with PC-Relate
+with the correction disabled.
+
+\subsection{Code availability}
+
+The \texttt{-{}-evaladmix} implementation and the three fixes above are at
+\texttt{github.com/aalbrechtsen/PCAone} (branch \texttt{main}), with
+\texttt{docs/evaladmix.md}, \texttt{docs/read-usv-fix.md} and
+\texttt{docs/ld-robustness-fixes.md} covering them. A clean clone builds with \texttt{make} and reproduces
+every number in Section~4 bit-identically.
+
+\subsection{Reproducibility notes}
+
+Two columns are re-implementations rather than program output, and are labelled as such: ``PCAngsd'' (the
+program no longer has the feature) and, in the first version of this comparison, ``PC-Relate''. The latter
+was subsequently validated against the genuine \texttt{pcrelate()}: with \texttt{small.samp.correct = FALSE}
+the two agree at a correlation of $1.0000$ and identical RMSE, which is what licenses using the
+re-implementation to stand in for PCAngsd. All kinship values are on the $\phi$ scale; evalAdmix output was
+halved to get there.
+
+\section{References}
+\small
+\begin{tightitem}
+  \item Conomos MP, Miller MB, Thornton TA (2015). Robust inference of population structure for ancestry prediction and correction of stratification in the presence of relatedness. \emph{Genet Epidemiol} 39:276--293. (PC-AiR)
+  \item Conomos MP, Reiner AP, Weir BS, Thornton TA (2016). Model-free estimation of recent genetic relatedness. \emph{Am J Hum Genet} 98:127--148. (PC-Relate)
+  \item Meisner J, Albrechtsen A (2018). Inferring population structure and admixture proportions in low-depth NGS data. \emph{Genetics} 210:719--731. (PCAngsd)
+  \item Garcia-Erill G, Albrechtsen A (2020). Evaluation of model fit of inferred admixture proportions. \emph{Mol Ecol Resour} 20:936--949. (evalAdmix)
+  \item van Waaij J, Li S, Garcia-Erill G, Albrechtsen A, Wiuf C (2023). Evaluation of population structure inferred by principal component analysis or the admixture model. \emph{Genetics} 225:iyad157.
+  \item Moltke I, Albrechtsen A (2014). RelateAdmix: a software tool for estimating relatedness between admixed individuals. \emph{Bioinformatics} 30:1027--1028.
+  \item N\o hr AK, Hangh\o j K, Garcia-Erill G, Li Z, Moltke I, Albrechtsen A (2021). NGSremix: a software tool for estimating pairwise relatedness between admixed individuals from next-generation sequencing data. \emph{G3} 11:jkab174.
+  \item Li Z, Meisner J, Albrechtsen A (2023). Fast and accurate out-of-core PCA framework for large scale biobank data. \emph{Genome Research} 33:1599--1608. (PCAone)
+\end{tightitem}
+
+\end{document}

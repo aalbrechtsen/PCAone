@@ -1,5 +1,8 @@
 # `pcaone-ibd`: IBD sharing probabilities (k0, k1, k2)
 
+> Picking this work up? See [HANDOVER.md](HANDOVER.md) for the
+> state of play, what is not established, and what to do next.
+
 Kinship alone cannot identify a relationship. **Parent–offspring and full sibs
 both have `phi = 1/4`**, so `--evaladmix` reports 0.2496 and 0.2475 for them —
 indistinguishable. Only the IBD sharing probabilities separate them: a parent and

@@ -1,0 +1,388 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{hdr}{HTML}{1F3864}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-2.4ex \@plus -1ex \@minus -.2ex}{1.3ex \@plus.2ex}%
+  {\normalfont\large\bfseries\color{hdr}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2.0ex \@plus -1ex \@minus -.2ex}{1.0ex \@plus.2ex}%
+  {\normalfont\normalsize\bfseries\color{hdr}}}
+\makeatother
+\newenvironment{tightitem}{%
+  \begin{itemize}\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}%
+  \setlength{\topsep}{3pt}\setlength{\parsep}{0pt}}{\end{itemize}}
+\renewcommand{\arraystretch}{1.15}
+
+\title{\vspace{-1.4cm}\color{hdr}\bfseries Estimating Relatedness in Admixed and Structured Populations\\[2pt]
+\large\mdseries\color{black} An overview of existing methods}
+\author{}
+\date{\small Compiled \today}
+
+\begin{document}
+\maketitle
+\vspace{-1.2cm}
+
+\section{The problem}
+
+Classical relatedness estimators --- the method-of-moments estimator in PLINK, or maximum-likelihood
+estimation of the Cotterman coefficients $(k_0,k_1,k_2)$ --- assume that both individuals are drawn from a
+single, homogeneous population with known allele frequencies $p$. Under admixture this assumption fails in
+two ways:
+
+\begin{tightitem}
+  \item \textbf{Population-level allele frequencies are the wrong frequencies.} Two unrelated individuals
+  who share ancestry from the same source population share alleles more often than the pooled frequency
+  predicts. They are scored as related; kinship is inflated, and the inflation scales with how differentiated
+  the source populations are ($F_{ST}$).
+  \item \textbf{Frequencies are individual-specific.} For an individual with ancestry proportions
+  $q_{i}=(q_{i1},\dots,q_{iK})$ and ancestry-specific frequencies $f_{1},\dots,f_{K}$, the relevant
+  frequency is $\pi_{i}=\sum_{k} q_{ik} f_{k}$, which differs between the two members of a pair. A pair
+  with \emph{different} ancestry profiles is then scored as \emph{less} related than unrelated --- KING-robust,
+  for instance, returns kinship estimates around $-0.13$ for unrelated pairs of dissimilar ancestry.
+\end{tightitem}
+
+Essentially all methods below are answers to the same question: \emph{what do you condition on so that
+``sharing alleles'' means ``sharing recent ancestors'' rather than ``sharing continental ancestry''?}
+Three families of answers exist, and they are summarised in Table~\ref{tab:methods}.
+
+\section{Three strategies}
+
+\subsection{(A) Condition on estimated ancestry: ancestry-specific allele frequencies}
+
+Run a global ancestry / admixture model first (ADMIXTURE, STRUCTURE, frappe, NGSadmix) to obtain
+$\hat{q}_{i}$ and $\hat{f}_{k}$, then plug the individual-specific frequencies
+$\hat{\pi}_{i}=\sum_k \hat q_{ik}\hat f_{k}$ into a relatedness model. This is the most explicit approach and
+gives interpretable IBD-state output, at the cost of depending on $K$ being sensible and on the admixture
+model fitting.
+
+\begin{tightitem}
+  \item \textbf{REAP} (Thornton et al.\ 2012) --- moment estimator of $(k_0,k_1,k_2)$ and kinship using
+  individual-specific frequencies conditional on genome-wide ancestry. The first method to make this idea
+  standard; validated under ancestry-related assortative and disassortative mating.
+  \item \textbf{RelateAdmix} (Moltke \& Albrechtsen 2014) --- full maximum-likelihood estimation of
+  $(k_0,k_1,k_2)$ given $\hat q$ and $\hat f$, accounting for the fact that the two IBD alleles must come
+  from the \emph{same} source population. R package plus a multithreaded C++ command-line tool.
+  \item \textbf{InRelate} (Sethuraman 2018) --- ML over the full nine-state Jacquard IBD framework
+  (so inbred as well as outbred pairs), for multi-allelic markers, given admixture-model ancestry.
+  \item \textbf{SEEKIN} (Dou et al.\ 2017) --- kinship for shallow / off-target sequencing and array data;
+  models genotype uncertainty (dosages from imputation) and corrects for structure using ancestry
+  coordinates. Works down to $\sim$0.15$\times$ depth; \texttt{SEEKIN-het} is the admixture-aware mode.
+  \item \textbf{NGSremix} (N\o hr et al.\ 2021) --- ML estimation of $(k_0,k_1,k_2)$ for admixed pairs from
+  \emph{genotype likelihoods}, so genotypes are never called. Designed for low-depth NGS ($\leq$4$\times$),
+  where calling genotypes would itself bias relatedness; outperforms PLINK, KING, RelateAdmix and NgsRelate
+  in that regime.
+\end{tightitem}
+
+\subsection{(B) Condition on principal components: PC-derived individual-specific frequencies}
+
+Instead of a discrete $K$-population model, regress genotypes on ancestry-representative PCs to predict
+each individual's expected allele frequency, and define relatedness from the residuals. No choice of $K$,
+no assumption that ancestral populations are discrete --- this is the ``model-free'' route.
+
+\begin{tightitem}
+  \item \textbf{PC-AiR} (Conomos, Miller \& Thornton 2015) --- \emph{not} a relatedness estimator, but the
+  necessary first half. Ordinary PCA in a sample containing relatives captures family structure rather than
+  ancestry. PC-AiR partitions the sample into an ancestry-representative unrelated subset, runs PCA there,
+  and projects the relatives back, giving PCs that reflect ancestry and not pedigree.
+  \item \textbf{PC-Relate} (Conomos, Reiner, Weir \& Thornton 2016) --- the second half. Uses the PC-AiR PCs
+  to obtain individual-specific allele frequencies, then estimates kinship coefficients, IBD-sharing
+  probabilities and inbreeding coefficients from the residual genotype correlations.
+  \item In practice the two are run as one iterative pipeline (PC-AiR $\rightarrow$ PC-Relate $\rightarrow$
+  refined unrelated set $\rightarrow$ PC-AiR again), implemented in the Bioconductor package
+  \textbf{GENESIS}. This is the de-facto standard in large human cohorts (TOPMed, UK Biobank-style analyses).
+\end{tightitem}
+
+\subsection{Where the individual allele frequencies come from: PCAngsd and EMU}
+
+Both strategy (A) and strategy (B) reduce to the same quantity: the \emph{individual allele frequency}
+$\pi_{is}$, the expected frequency at site $s$ for individual $i$ given their ancestry. Strategy (A) gets it
+from a discrete $K$-population decomposition, $\pi_{is}=\sum_k q_{ik}f_{ks}$; strategy (B) gets it from a
+low-rank (PCA) decomposition of the genotype matrix. Two tools from the low-rank side deserve separate
+mention, because they are what make the whole framework usable on data where genotypes cannot be trusted.
+
+\textbf{PCAngsd} (Meisner \& Albrechtsen 2018) estimates individual allele frequencies for \emph{low-depth}
+NGS data directly from genotype likelihoods, so no genotype is ever called. The model is
+$\Pi = \mathbf{S}\mathbf{A}$: individual frequencies are a low-rank product of a population-structure
+matrix and a loading matrix. It is fitted by an iterative EM-like scheme:
+\begin{enumerate}
+  \item estimate population frequencies $\hat p_s$ from the genotype likelihoods;
+  \item form posterior genotype probabilities $P(G_{is}=g\mid X_{is},\hat\pi_{is})$ by Bayes' rule and take
+  \emph{dosages} $E[G_{is}\mid X_{is},\hat\pi_{is}]$;
+  \item centre the dosages, truncate their SVD at $D$ components, and add $2\hat p_s$ back to obtain
+  $\hat\Pi$;
+  \item feed $\hat\pi_{is}$ back in as the prior for step 2, and iterate to convergence.
+\end{enumerate}
+The covariance matrix is then computed from dosages centred on $2\hat p_s$, which is valid under structure
+precisely \emph{because} the dosages already condition on $\hat\pi$. The same $\hat\Pi$ is then reused
+downstream: admixture proportions by NMF, $\hat\Pi \approx QF^{\!\top}$ (\texttt{-{}-admix}), which is exactly
+the $\hat q,\hat f$ that RelateAdmix and NGSremix need, plus inbreeding coefficients, HWE tests, selection
+scans and genotype calling. In other words, PCAngsd supplies the input for strategy~(A) as well as the PCs of
+strategy~(B) from a single fit.
+
+One caveat, since it is natural to assume otherwise: \textbf{PCAngsd does not itself estimate pairwise
+kinship any more.} Versions up to 0.99 had a \texttt{-kinship} flag implementing a PC-Relate-style (Conomos)
+kinship matrix adapted to genotype likelihoods, plus a \texttt{-relate} option for filtering related
+individuals out of a Beagle file. Both were dropped in the January 2021 Cython rework, and the current
+release (v1.36) exposes only \emph{inbreeding} estimators (\texttt{-{}-inbreed-sites},
+\texttt{-{}-inbreed-samples}). PCAone is the same: \texttt{-{}-inbreed}, but no kinship. In a present-day
+pipeline PCAngsd and PCAone are therefore the \emph{front-end} producing $\hat\pi$ or $\hat q,\hat f$; the
+relatedness estimate itself comes from NGSremix, RelateAdmix or PC-Relate.
+
+\textbf{EMU} (Meisner, Liu, Huang \& Albrechtsen 2021) solves the neighbouring problem: PCA when the data are
+\emph{called} genotypes but enormous fractions are \emph{missing} --- ultra-low-coverage sequencing, NIPT
+data, merged arrays with different marker sets, ancient DNA. Standard PCA has to impute missing entries
+(usually with the mean), and individuals then separate along PCs according to \emph{how much data they are
+missing} rather than their ancestry. EMU uses an accelerated EM algorithm for PCA that models the
+missingness explicitly and iteratively, alternating between a truncated SVD and re-imputation of the missing
+entries from the current low-rank fit --- structurally the same idea as PCAngsd's loop, with missingness in
+place of genotype uncertainty. It scales to biobank-sized data (Python implementation).
+
+\textbf{PCAone} (Li, Meisner \& Albrechtsen 2023) is the scalable implementation of this whole layer. It is a
+C++ PCA framework offering three fast SVD algorithms --- implicitly restarted Arnoldi (\texttt{-{}-svd 0}),
+single-pass randomized SVD with power iterations (\texttt{-{}-svd 1}) and the proposed window-based
+randomized SVD, winSVD (\texttt{-{}-svd 2}) --- each with in-core \emph{and} out-of-core modes, so biobank-scale
+matrices need not fit in RAM. Crucially for the present purpose it re-implements \emph{both} the EMU and the
+PCAngsd algorithms, so missingness and genotype-likelihood uncertainty are handled inside the same fast
+framework, reading PLINK BED, PLINK2 PGEN, BGEN, Beagle and CSV. It also provides ancestry-adjusted LD
+statistics for pruning and clumping --- relevant here because LD pruning with \emph{unadjusted} LD in a
+structured sample preferentially removes exactly the ancestry-informative sites the relatedness estimator
+needs to be conditioned on.
+
+For relatedness work the practical point is the choice of front-end:
+\begin{tightitem}
+  \item \emph{low depth, genotype likelihoods available} $\rightarrow$ PCAngsd (or NGSadmix for discrete $K$),
+  then NGSremix for the actual relatedness estimation;
+  \item \emph{called genotypes, heavy and non-random missingness} $\rightarrow$ EMU for the ancestry axes,
+  then a PC-based relatedness estimator;
+  \item \emph{called genotypes, complete data} $\rightarrow$ PC-AiR, or ADMIXTURE for discrete $K$.
+\end{tightitem}
+A relatedness estimate is only as good as the $\hat\pi$ it conditions on, so this step is not a preliminary
+--- it is half the method.
+
+\subsection{Correlation of residuals as a kinship estimator: evalAdmix}
+
+There is a fourth route into the same quantity, arrived at from the opposite direction. \textbf{evalAdmix}
+(Garcia-Erill \& Albrechtsen 2020) was built to \emph{test the fit} of an admixture analysis, not to estimate
+relatedness. Given genotypes and the output of ADMIXTURE/STRUCTURE/NGSadmix, it forms the residual
+$g_{is}-2\hat\pi_{is}$ between the observed genotype and the genotype predicted by the admixture model, and
+reports the matrix of pairwise \emph{correlations of residuals}. Under a correctly specified model the
+residuals of two individuals are uncorrelated, so entries near zero indicate good fit; systematic positive
+correlation within groups and negative correlation between groups indicates the model is wrong (too small a
+$K$, ghost populations, drift after admixture, non-discrete ancestral populations).
+
+But note what the residual is: exactly the deviation from the individual allele frequency. Two individuals
+who share recent ancestors deviate from $\hat\pi$ in the \emph{same direction}, so relatedness produces a
+positive residual correlation --- which is precisely PC-Relate's estimator, with the admixture model in place
+of the PC regression. The correlation of residuals is therefore a kinship estimate; its documentation
+flags this the other way round, warning that a positive correlation ``might also be due to relatedness''.
+Concretely, the residual correlation estimates $r_{ij}=2\phi_{ij}$, the coancestry/relatedness coefficient,
+not $\phi_{ij}$ itself.
+
+This is easy to confirm. Running evalAdmix on the 126-individual example data distributed with RelateAdmix
+($K=2$, 104{,}290 SNPs) and comparing against RelateAdmix's own ML estimates on the same data and same
+$\hat q,\hat f$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Relationship class & $\hat\phi$ (RelateAdmix) & mean corr.\ of residuals & $n$ pairs \\
+\midrule
+unrelated        & 0.000 & $-0.003$ & 7816 \\
+second cousins   & 0.012 & 0.036 & 9 \\
+first cousins    & 0.053 & 0.124 & 10 \\
+half sibs        & 0.111 & 0.245 & 10 \\
+PO / full sibs   & 0.247 & 0.494 & 20 \\
+MZ / duplicates  & 0.500 & 1.000 & 10 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The Pearson correlation between the two is $r=0.988$, and the regression is
+$\text{corr.\ resid.} = 2.02\,\hat\phi - 0.004$ --- the factor of two expected if the residual correlation
+estimates $2\phi$. Duplicate pairs return exactly $1.000$. Unrelated pairs centre on $-0.003$ with
+SD $0.007$.
+
+Two practical consequences. First, if you are running evalAdmix to choose $K$, close relatives will show up
+as bad model fit and can be mistaken for a $K$ problem --- so remove relatives first, or read the outliers
+as relatedness. Second, in the other direction, an evalAdmix run you already have is a usable relatedness
+screen for free.
+
+\textbf{The PCA version} (van Waaij, Li, Garcia-Erill, Albrechtsen \& Wiuf 2023) generalises this to
+population structure inferred by \emph{either} PCA or the admixture model, and replaces the original
+leave-one-out frequency correction with an analytic bias correction: compare the empirical correlation of
+residuals $\hat b$ with the correlation $\hat c$ implied by the model itself, obtained from
+$(\mathbf{I}-\mathbf{P})\hat{\mathbf{D}}(\mathbf{I}-\mathbf{P})$ where $\mathbf{P}$ projects onto the column
+space of $Q$ (or of the PCs). Under a correct model with $k'=k$, $\hat b - \hat c \to 0$ as the number of
+SNPs grows. It is single-pass rather than iterative, needs only genotypes and $Q$ (no ancestral frequency
+file), and is available in evalAdmix v1.0 as \texttt{-method corrected}, with an R implementation at
+\texttt{github.com/popgenDK/evalPopStructure}. Tellingly, in their 1000 Genomes analysis the elevated
+corrected coefficients are explained by five pairs of first-degree relatives --- i.e.\ the statistic
+is picking up kinship exactly as above.
+
+\subsection{(C) Avoid allele frequencies altogether}
+
+Use only the joint genotype-sharing pattern within the pair, so that no external frequency --- correct or
+incorrect --- can bias the estimate.
+
+\begin{tightitem}
+  \item \textbf{KING-robust} (Manichaikul et al.\ 2010) --- kinship from counts of shared heterozygotes
+  versus opposing homozygotes. Robust to \emph{discrete} structure and to small samples, and universally used
+  as a fast screen. Its documented failure mode is exactly the admixture case: unbiased when both members of
+  a pair have similar admixture proportions, systematically negative when they do not.
+  \item \textbf{$R_0$, $R_1$, KING-robust kinship} (Waples, Albrechtsen \& Moltke 2019) --- three
+  genotype-sharing summary statistics, of which the pairs $(R_1,R_0)$ and $(R_1,\text{KING})$ separate
+  parent--offspring, full sibs, half sibs/avuncular/grandparent and unrelated without any allele frequencies
+  and without genomic positions. Robust to ascertainment bias; well suited to non-model organisms, ancient
+  DNA and reference-free settings. Distinguishes relationship \emph{classes} rather than returning
+  unbiased $(k_0,k_1,k_2)$.
+\end{tightitem}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Methods for relatedness estimation under admixture / population structure.}
+\label{tab:methods}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.3cm} >{\raggedright\arraybackslash}p{1.5cm} >{\raggedright\arraybackslash}p{2.6cm} >{\raggedright\arraybackslash}p{3.1cm} >{\raggedright\arraybackslash}p{4.5cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Strategy} & \textbf{Input data} & \textbf{Ancestry handled via} & \textbf{Output / notes} \\
+\midrule
+PLINK \texttt{-{}-genome} & baseline & called genotypes & \emph{nothing} & $(k_0,k_1,k_2)$; biased under admixture \\
+NgsRelate & baseline & genotype likelihoods & \emph{nothing} & $(k_0,k_1,k_2)$; single-population, low depth \\
+\addlinespace
+KING-robust & (C) & called genotypes & pairwise genotype sharing & kinship; fast screen, biased for pairs of \emph{differing} ancestry \\
+$R_0/R_1$/KING & (C) & genotypes or GLs & none needed & relationship class; no allele freqs, no positions \\
+\addlinespace
+REAP & (A) & called genotypes & $\hat q,\hat f$ from ADMIXTURE etc. & $(k_0,k_1,k_2)$, kinship; moment estimator \\
+RelateAdmix & (A) & PLINK bed + \texttt{.P}/\texttt{.Q} & $\hat q,\hat f$ from ADMIXTURE etc. & $(k_0,k_1,k_2)$; ML, multithreaded C++ / R \\
+InRelate & (A) & multi-allelic genotypes & $\hat q,\hat f$ & all 9 Jacquard states; handles inbreeding \\
+SEEKIN & (A) & sparse seq.\ / dosages & ancestry coordinates + ref.\ panel & kinship; works at $\sim$0.15$\times$ depth \\
+NGSremix & (A) & genotype likelihoods & $\hat q,\hat f$ (NGSadmix/PCAngsd) & $(k_0,k_1,k_2)$; best for low-depth admixed \\
+\addlinespace
+PC-AiR & (B) & called genotypes & --- & ancestry PCs unconfounded by relatedness \\
+PC-Relate & (B) & called genotypes & PC-AiR PCs & kinship, IBD probs, inbreeding; ``model-free'' \\
+PCAngsd & front-end & genotype likelihoods & iterative SVD on dosages $\rightarrow\hat\pi$ & $\hat\pi$, PCA, $\hat q,\hat f$ (NMF), inbreeding; \emph{no} kinship since v1.0 \\
+EMU & front-end & called genotypes, much missing & EM-PCA modelling missingness & ancestry PCs unbiased by missingness \\
+\addlinespace
+evalAdmix & (A) residuals & PLINK bed or Beagle GLs & residual vs.\ $2\hat\pi$ from $\hat q,\hat f$ & corr.\ of residuals $\approx 2\phi$; built as a model-fit test \\
+evalAdmix \texttt{-method corrected} & (A)/(B) residuals & PLINK bed & analytic $\hat b-\hat c$ correction, $Q$ or PCs & as above, single-pass, no \texttt{.P} needed \\
+\addlinespace
+PCAone & front-end & BED/PGEN/BGEN/Beagle/CSV & winSVD; implements EMU \& PCAngsd & fast in-/out-of-core PCA, $\hat\pi$, inbreeding, ancestry-adj. LD; no kinship \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{From kinship to $(k_0,k_1,k_2)$: what PC-Relate actually computes}
+
+One clarification first: \textbf{PC-AiR does not do this}. PC-AiR produces only the ancestry PCs; the IBD
+sharing probabilities come from \textbf{PC-Relate}. The description below follows the GENESIS
+implementation (\texttt{pcrelate}, \texttt{ibd.probs = TRUE}), where $g_{is}\in\{0,1,2\}$ is the allele count
+and $\hat\mu_{is}$ is the individual-specific allele frequency obtained by regressing genotypes on the
+PC-AiR PCs (fitted on a training set of mutually unrelated individuals) and halving the prediction.
+
+\paragraph{Kinship.} Form the residual $R_{is}=g_{is}-2\hat\mu_{is}$ and take a normalised cross-product:
+\begin{equation*}
+\hat\phi_{ij}=\frac{\sum_s R_{is}R_{js}}
+{4\sum_s \sqrt{\hat\mu_{is}(1-\hat\mu_{is})\,\hat\mu_{js}(1-\hat\mu_{js})}}.
+\end{equation*}
+
+\paragraph{$k_2$ from a dominance coding.} Define the dominance-coded genotype
+\begin{equation*}
+D_{is}=\begin{cases}\hat\mu_{is} & g_{is}=0\\ 0 & g_{is}=1\\ 1-\hat\mu_{is} & g_{is}=2\end{cases}
+\qquad
+\tilde D_{is}=D_{is}-\hat\mu_{is}(1-\hat\mu_{is}),
+\end{equation*}
+which has $E[\tilde D_{is}]=0$ under HWE. Its cross-product isolates the IBD-2 component, because the
+dominance covariance between two individuals is proportional to $k_2$ alone:
+\begin{equation*}
+\hat k_2=\frac{\sum_s \tilde D_{is}\tilde D_{js}}
+{\sum_s \hat\mu_{is}(1-\hat\mu_{is})\,\hat\mu_{js}(1-\hat\mu_{js})}.
+\end{equation*}
+
+\paragraph{$k_0$ from opposing homozygotes.} If a pair shares \emph{any} allele IBD at a site, they cannot be
+opposing homozygotes. So the observed IBS0 count, divided by the count expected if the pair shared nothing,
+estimates $k_0$ directly:
+\begin{equation*}
+\hat k_0=\frac{\sum_s \left[\mathbf{1}(g_{is}{=}2,g_{js}{=}0)+\mathbf{1}(g_{is}{=}0,g_{js}{=}2)\right]}
+{\sum_s \left[\hat\mu_{is}^{2}(1-\hat\mu_{js})^{2}+(1-\hat\mu_{is})^{2}\hat\mu_{js}^{2}\right]}.
+\end{equation*}
+
+\paragraph{$k_1$ by subtraction.} $\hat k_1 = 1-\hat k_0-\hat k_2$. GENESIS stores \texttt{kin}, \texttt{k0}
+and \texttt{k2}; $k_1$ is left as the remainder.
+
+\medskip
+\noindent
+So the direct answer to ``how does it go from kinship to IBD sharing'' is: \emph{for close pairs, it does
+not}. $\hat\phi$, $\hat k_0$ and $\hat k_2$ are three separate estimators computed from the same residuals,
+and the identity $\phi=k_1/4+k_2/2$ is not used to derive them. That matters because parent--offspring and
+full sibs both have $\phi=1/4$ --- kinship alone cannot tell them apart, and it is the IBS0-based $\hat k_0$
+($0$ versus $1/4$) that does.
+
+\paragraph{The corrections, applied only when IBD probabilities are requested.} Three, in order:
+\begin{tightitem}
+  \item \emph{Inbreeding.} Departure from HWE inflates the dominance covariance, so PC-Relate subtracts the
+  product of the two individuals' inbreeding coefficients (the diagonal of the same output):
+  $\hat k_2 \leftarrow \hat k_2 - \hat f_i \hat f_j$.
+  \item \emph{Residual ancestry and kinship bias in $\hat k_2$ (small-sample correction).} For each PC
+  $k\ge 2$, regress the current $\hat k_2$ on the entries of $V_k V_k^{\!\top}$ with a linear and a quadratic
+  term, fitting on pairs with $\hat\phi<2^{-11/2}\approx 0.022$ (effectively unrelated), and subtract the
+  fitted value. Then regress on $\hat\phi$ itself, fitting on pairs with $\hat k_2<2^{-9/2}\approx 0.044$,
+  and subtract that too.
+  \item \emph{$k_0$ for more distant pairs.} \emph{Here} the kinship identity finally enters. For pairs below
+  the first-degree boundary, $\hat\phi<2^{-5/2}\approx 0.177$, the IBS0 estimate is discarded and replaced by
+  \begin{equation*}
+  \hat k_0 = 1-4\hat\phi+\hat k_2,
+  \end{equation*}
+  which is exactly $\phi=k_1/4+k_2/2$ with $k_1=1-k_0-k_2$, rearranged. The reason for the switch is that in
+  distant pairs the IBS0 count is dominated by noise and genotyping error, while $\hat\phi$ is still well
+  estimated; in first-degree pairs the IBS0 estimator is kept, for the reason above.
+\end{tightitem}
+
+\section{Choosing a method}
+
+\begin{tightitem}
+  \item \textbf{Array or high-depth genotypes, human cohort, cryptic structure:} PC-AiR + PC-Relate
+  (GENESIS). No $K$ to choose, and it is what large consortia use. Screen first with KING-robust.
+  \item \textbf{You have a defensible admixture model} (a clear $K$, good reference panels): REAP or
+  RelateAdmix. RelateAdmix gives proper ML $(k_0,k_1,k_2)$, which matters if you want to distinguish
+  full sibs from parent--offspring rather than just rank kinship.
+  \item \textbf{Low-depth sequencing:} do not call genotypes. NGSremix (with NGSadmix or PCAngsd for
+  $\hat q,\hat f$), or SEEKIN for very sparse/off-target data.
+  \item \textbf{Non-model organism, ancient DNA, no reference frequencies:} $R_0$/$R_1$/KING, which needs
+  neither frequencies nor a genetic map.
+  \item \textbf{Always:} report which ancestry model was used and at what $K$. Under strategy~(A), the
+  relatedness estimates are conditional on $\hat q$ and $\hat f$; a poorly chosen $K$ propagates directly
+  into the kinship estimates.
+\end{tightitem}
+
+\section{References}
+\small
+\begin{tightitem}
+  \item Manichaikul A, Mychaleckyj JC, Rich SS, Daly K, Sale M, Chen W-M (2010). Robust relationship inference in genome-wide association studies. \emph{Bioinformatics} 26:2867--2873. (KING)
+  \item Thornton T, Tang H, Hoffmann TJ, Ochs-Balcom HM, Caan BJ, Risch N (2012). Estimating kinship in admixed populations. \emph{Am J Hum Genet} 91:122--138. (REAP)
+  \item Moltke I, Albrechtsen A (2014). RelateAdmix: a software tool for estimating relatedness between admixed individuals. \emph{Bioinformatics} 30:1027--1028.
+  \item Conomos MP, Miller MB, Thornton TA (2015). Robust inference of population structure for ancestry prediction and correction of stratification in the presence of relatedness. \emph{Genet Epidemiol} 39:276--293. (PC-AiR)
+  \item Conomos MP, Reiner AP, Weir BS, Thornton TA (2016). Model-free estimation of recent genetic relatedness. \emph{Am J Hum Genet} 98:127--148. (PC-Relate)
+  \item Dou J, Sun B, Sim X, Hughes JD, Reilly DF, Tai ES, Liu J, Wang C (2017). Estimation of kinship coefficient in structured and admixed populations using sparse sequencing data. \emph{PLoS Genet} 13:e1007021. (SEEKIN)
+  \item Meisner J, Albrechtsen A (2018). Inferring population structure and admixture proportions in low-depth NGS data. \emph{Genetics} 210:719--731. (PCAngsd)
+  \item Sethuraman A (2018). Estimating genetic relatedness in admixed populations. \emph{G3} 8:3203--3220. (InRelate)
+  \item Waples RK, Albrechtsen A, Moltke I (2019). Allele frequency-free inference of close familial relationships from genotypes or low-depth sequencing data. \emph{Mol Ecol} 28:35--48.
+  \item Garcia-Erill G, Albrechtsen A (2020). Evaluation of model fit of inferred admixture proportions. \emph{Mol Ecol Resour} 20:936--949. (evalAdmix)
+  \item Meisner J, Liu S, Huang M, Albrechtsen A (2021). Large-scale inference of population structure in presence of missingness using PCA. \emph{Bioinformatics} 37:1868--1875. (EMU)
+  \item van Waaij J, Li S, Garcia-Erill G, Albrechtsen A, Wiuf C (2023). Evaluation of population structure inferred by principal component analysis or the admixture model. \emph{Genetics} 225:iyad157.
+  \item Li Z, Meisner J, Albrechtsen A (2023). Fast and accurate out-of-core PCA framework for large scale biobank data. \emph{Genome Research} 33:1599--1608. (PCAone)
+  \item N\o hr AK, Hangh\o j K, Garcia-Erill G, Li Z, Moltke I, Albrechtsen A (2021). NGSremix: a software tool for estimating pairwise relatedness between admixed individuals from next-generation sequencing data. \emph{G3} 11:jkab174.
+\end{tightitem}
+
+\end{document}

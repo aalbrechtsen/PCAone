@@ -46,3 +46,8 @@ Rplots.pdf
 /*.png
 
 /pcaone-ibd
+
+# LaTeX build artefacts under docs/relatedness
+docs/relatedness/*.aux
+docs/relatedness/*.log
+docs/relatedness/*.out

@@ -1,5 +1,8 @@
 # `--evaladmix`: correlation of residuals from the top PCs
 
+> Picking this work up? See [HANDOVER.md](HANDOVER.md) for the
+> state of play, what is not established, and what to do next.
+
 `--evaladmix` computes the evalAdmix statistic (Garcia-Erill & Albrechtsen 2020,
 *Mol Ecol Resour* 20:936) using the analytic projection estimator of van Waaij
 et al. (2023, *Genetics* 225:iyad157), with **PCA rather than an admixture model**

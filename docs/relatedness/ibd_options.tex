@@ -1,0 +1,378 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{hdr}{HTML}{1F3864}
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-2.4ex \@plus -1ex \@minus -.2ex}{1.3ex \@plus.2ex}%
+  {\normalfont\large\bfseries\color{hdr}}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-2.0ex \@plus -1ex \@minus -.2ex}{1.0ex \@plus.2ex}%
+  {\normalfont\normalsize\bfseries\color{hdr}}}
+\makeatother
+\newenvironment{tightitem}{%
+  \begin{itemize}\setlength{\itemsep}{1pt}\setlength{\parskip}{0pt}%
+  \setlength{\topsep}{3pt}\setlength{\parsep}{0pt}}{\end{itemize}}
+\renewcommand{\arraystretch}{1.15}
+
+\title{\vspace{-1.4cm}\color{hdr}\bfseries Estimating $(k_0,k_1,k_2)$ from Individual Allele Frequencies\\[2pt]
+\large\mdseries\color{black} The solution space, measured}
+\author{}
+\date{\small Compiled \today}
+
+\begin{document}
+\maketitle
+\vspace{-1.1cm}
+
+\section{The problem}
+
+PCAone's \texttt{-{}-evaladmix} returns the kinship coefficient $\phi$. That is not enough to identify a
+relationship, because \textbf{parent--offspring and full sibs both have $\phi=1/4$}. Only the IBD sharing
+probabilities separate them: a parent and child share exactly one allele IBD everywhere
+($k_0,k_1,k_2)=(0,1,0)$, while full sibs average $(\tfrac14,\tfrac12,\tfrac14)$. Any pipeline that has to
+decide \emph{which} relatives it has found, rather than merely that it has found some, needs $k$.
+
+The input available is what PCAone already computes: the genotypes $g_{is}\in\{0,1,2\}$ and the individual
+allele frequencies
+\begin{equation*}
+\hat\pi_{is}=\tfrac12\,\big[V(V^{\!\top}V)^{-1}V^{\!\top}G\big]_{is},
+\end{equation*}
+the frequency expected at site $s$ for individual $i$ given their position on the top $K-1$ PCs. The question
+is what can be built from those two objects.
+
+This note enumerates the options, measures them on the RelateAdmix benchmark data (126 individuals,
+102{,}185 sites, $K=2$, a known pedigree with ten pairs per relationship class), and identifies which
+survive. Numbers throughout are measured, not estimated.
+
+\section{Two framing decisions}
+
+Before comparing estimators, two choices narrow the space considerably.
+
+\subsection{Estimate $k$ only for pairs above a kinship threshold}
+
+$k$ is meaningless for unrelated pairs --- the answer is $(1,0,0)$ and everything else is noise. Screening on
+the kinship that has already been computed, at $\phi>0.05$:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+threshold & pairs kept & related kept & unrelated leaked \\
+\midrule
+$\phi>0.02$ & 53 & 53 & 0 \\
+$\boldsymbol{\phi>0.05}$ & \textbf{50 of 7875 (0.63\%)} & \textbf{50} & \textbf{0} \\
+$\phi>0.08$ & 40 & 40 & 0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Every first cousin and closer survives; no unrelated pair leaks through. Second cousins (true
+$\phi=0.0156$) fall below, which is the right call.
+
+The consequence is architectural, not cosmetic. \textbf{The number of related pairs is $O(N)$, not $O(N^2)$},
+so the per-pair budget becomes essentially unlimited --- a full likelihood is affordable --- and the
+$O(N^2)$ memory that would otherwise cap the analysis never arises.
+
+\subsection{Relatives in admixed data do not share ancestry}
+
+This is the fact that eliminates the most obvious solution. In the benchmark data, relatives are
+deliberately paired across the ancestry gradient, because that is the case these methods exist to handle:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+ & duplicate & full sib & parent--offs. & 1st cousin & half sib & 2nd cousin \\
+\midrule
+mean $|q_i-q_j|$ & 0.000 & 0.003 & 0.210 & 0.325 & 0.429 & 0.430 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+A half-sib pair can differ by $0.43$ in admixture proportion. So $\hat\pi_{is}$ and $\hat\pi_{js}$ genuinely
+differ, and any method that collapses them to a single number discards precisely what the individual allele
+frequencies encode. Note that the threshold of \S2.1 does \emph{not} help here: related pairs differ in
+ancestry \emph{more} than unrelated ones, not less.
+
+\section{The solution space}
+
+\subsection{(A) Method of moments --- the PC-Relate estimators}
+
+Three statistics computed independently from the same data, not derived from one another. $k_2$ comes from a
+dominance coding, whose covariance isolates IBD-2 because it vanishes under IBD-1 sharing; $k_0$ from
+opposing-homozygote counts, which are impossible if the pair shares any allele IBD; $k_1$ by subtraction.
+
+\begin{equation*}
+\hat k_2=\frac{\sum_s \tilde D_{is}\tilde D_{js}}{\sum_s \hat\mu_{is}\hat q_{is}\hat\mu_{js}\hat q_{js}},
+\qquad
+\hat k_0=\frac{\sum_s\left[\mathbf 1(g_{is}{=}2,g_{js}{=}0)+\mathbf 1(g_{is}{=}0,g_{js}{=}2)\right]}
+{\sum_s\left[\hat\mu_{is}^2\hat q_{js}^2+\hat q_{is}^2\hat\mu_{js}^2\right]},
+\qquad
+\hat k_1=1-\hat k_0-\hat k_2 .
+\end{equation*}
+
+\textbf{Streams.} Every accumulator is a cross-product of an $N\times m$ matrix, so each is a sum over site
+blocks. Verified against an explicit per-pair loop to $7.8\times10^{-16}$ ($k_2$) and
+$1.1\times10^{-15}$ ($k_0$). Memory is $O(N^2)$, independent of the number of sites.
+
+\textbf{Weaknesses.} The estimators are unconstrained, and \textbf{68.4\% of pairs land outside the simplex}
+--- mostly small negative $\hat k_2$, since for unrelated pairs the truth is zero and an unconstrained
+estimator scatters both ways. Accuracy also depends on three post-hoc corrections (inbreeding subtraction, a
+small-sample regression on the PC outer products, and a swap to $\hat k_0=1-4\hat\phi+\hat k_2$ for distant
+pairs) carrying two hard-coded thresholds and fitted on the pairs the method itself judges unrelated.
+
+\subsection{(B) Maximum likelihood with a pooled frequency --- fails}
+
+The obvious likelihood: per site, mix the three IBD-state genotype distributions using a single pooled
+frequency $\pi_{ij}$, and fit $k$ by EM. It does not work:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+ & $k_0$ & $k_1$ & $k_2$ & expected \\
+\midrule
+parent--offspring & 0.831 & 0.169 & 0.000 & $0,\,1,\,0$ \\
+full sib          & 0.754 & 0.033 & 0.213 & $\tfrac14,\tfrac12,\tfrac14$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+A parent--offspring pair is reported as $83\%$ unrelated. The cause is \S2.2: pooling $\hat\pi_i$ and
+$\hat\pi_j$ for a pair whose ancestries differ by $0.21$ destroys the model. This option is listed only
+because it is the natural first attempt and its failure is not visible until it is tried.
+
+\subsection{(C) Maximum likelihood at the allele level --- works}
+
+The fix is to stop modelling genotypes and model the alleles. Each individual's \emph{own} frequency governs
+its \emph{own} non-shared allele; only the IBD-shared allele $S$ needs a pooled frequency:
+
+\begin{align*}
+\text{IBD}=0:&\quad g_i\sim\mathrm{HWE}(\hat\pi_i),\ g_j\sim\mathrm{HWE}(\hat\pi_j)\ \text{independent}\\
+\text{IBD}=1:&\quad S\sim\hat\pi_{ij},\quad A_i\sim\hat\pi_i,\quad A_j\sim\hat\pi_j\\
+\text{IBD}=2:&\quad g_i=g_j\sim\mathrm{HWE}(\hat\pi_{ij})
+\end{align*}
+
+with $\hat\pi_{ij}=\tfrac12(\hat\pi_i+\hat\pi_j)$, fitted by EM over the three states. Same inputs as (B),
+same optimiser, but the asymmetry is retained --- and the result is exact where (B) was off by $0.83$.
+
+\textbf{Does not stream.} The objective is $\sum_s\log P(\cdot)$, and a sum of logs does not factor into
+cross-products. It needs per-site access for each pair. Under \S2.1 this is irrelevant: $0.63\%$ of pairs.
+
+\subsection{(D) Constrained ML on an admixture decomposition --- RelateAdmix's model}
+
+The statistically principled version. An IBD-shared allele is drawn once from \emph{one} ancestral
+population, so the correct likelihood conditions on $q$ and $f$ separately rather than on their product
+$\pi=\sum_k q_kf_k$. This is what RelateAdmix and NGSremix do, and it is why they are the reference methods
+for admixed relatedness.
+
+\textbf{Cost.} PCAone does not produce $q$ and $f$. It would need an NMF of $\hat\Pi\approx QF^{\!\top}$
+(PCAngsd does this) or an external ADMIXTURE run --- reintroducing a choice of $K$, a discreteness
+assumption about ancestral populations, and typically the dominant cost of the whole analysis. Option (C)
+approximates this model while avoiding all three.
+
+\subsection{(E) Segment-based methods}
+
+Out of scope by assumption, and unavailable here: IBD-segment detection needs genetic-map positions and
+usually phasing, neither of which is part of a PCA workflow.
+
+\section{Measured comparison}
+
+All on the same data, against theoretical kinship.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+\textbf{class (statistic)} & \textbf{truth} & \textbf{(C) ML from $\pi$} & \textbf{(A) moments, raw} & \textbf{(A) moments, corrected} \\
+\midrule
+duplicate \ ($k_2$)        & 1    & \textbf{1.000} & 0.966 & 0.979 \\
+parent--offspring \ ($k_1$)& 1    & \textbf{1.000} & 1.005 & \textbf{1.000} \\
+full sib \ ($k_0$)         & 0.25 & 0.264 & 0.255 & \textbf{0.255} \\
+half sib \ ($k_0$)         & 0.5  & 0.565 & 0.530 & \textbf{0.495} \\
+first cousin \ ($k_0$)     & 0.75 & 0.794 & 0.764 & \textbf{0.738} \\
+unrelated \ ($k_0$)        & 1    & \textbf{0.999} & 0.987 & --- \\
+\midrule
+inside the simplex          &      & \textbf{always} & 31.6\% of pairs & mostly \\
+post-hoc corrections needed &      & \textbf{none}   & three & three \\
+streams                     &      & no & \textbf{yes} & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textbf{Neither dominates.} (C) is exact at the simplex boundaries --- duplicates, parent--offspring,
+unrelated. The corrected moments are better in the interior, at half sibs and first cousins, where (C)
+attenuates ($k_0=0.565$ for a truth of $0.5$).
+
+\section{Recommendation}
+
+\textbf{Option (C), the allele-level ML, restricted to pairs with $\phi>0.05$.} The reasoning is not that it
+is uniformly the most accurate, because it is not:
+
+\begin{tightitem}
+  \item It is \textbf{exact on the cases that get acted on}. Duplicates and parent--offspring are what get
+  removed from a study or flagged as sample swaps, and it separates PO from full sibs perfectly
+  ($k_1=1.000$ versus $0.496$).
+  \item It is \textbf{always inside the simplex} by construction, where the raw moments put 68\% of pairs
+  outside it.
+  \item It needs \textbf{no post-hoc corrections} --- no hard-coded thresholds, no regression fitted on the
+  pairs the method has itself judged unrelated.
+  \item Under the threshold its one disadvantage evaporates. The moments' advantage is that they stream;
+  streaming buys nothing when only $0.63\%$ of pairs are being estimated.
+\end{tightitem}
+
+\subsection{The attenuation, and how to remove it}
+
+Option (C) attenuates at half sibs and first cousins --- $k_0=0.565$ for a truth of $0.5$. The cause is not
+the estimator but its input: $\hat\pi$ has partly absorbed the relatedness being measured, because the pair
+contributed to the regression that produced it. RelateAdmix shows the same signature for the same reason.
+
+That cause can be attacked directly. Since
+$\hat\beta_s=(V^{\!\top}V)^{-1}V^{\!\top}g_s$, dropping the pair's two rows from \emph{both} sides is a
+rank-2 downdate,
+\begin{equation*}
+\hat\beta^{(-ij)}_s=\big(V^{\!\top}V-v_iv_i^{\!\top}-v_jv_j^{\!\top}\big)^{-1}
+\big(V^{\!\top}g_s-v_i g_{is}-v_j g_{js}\big),
+\end{equation*}
+so $\hat\pi_i$ and $\hat\pi_j$ can be re-formed without the pair at the cost of one
+$(k{+}1)\times(k{+}1)$ solve per pair and one extra axpy per site. It is the same idea as evalAdmix's
+leave-one-out refit of $F$, transposed to the PC regression.
+
+\textbf{It works:}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrrrrrrl@{}}
+\toprule
+ & \multicolumn{3}{c}{\textbf{no leave-one-out}} & \multicolumn{3}{c}{\textbf{leave-one-out}} & \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+ & $k_0$ & $k_1$ & $k_2$ & $k_0$ & $k_1$ & $k_2$ & \textbf{expected} \\
+\midrule
+duplicate         & 0.000 & 0.000 & 1.000 & 0.000 & 0.000 & 1.000 & $0,0,1$ \\
+parent--offspring & 0.000 & 1.000 & 0.000 & 0.000 & 0.998 & 0.002 & $0,1,0$ \\
+full sib          & 0.264 & 0.496 & 0.240 & \textbf{0.253} & \textbf{0.504} & 0.243 & $.25,.5,.25$ \\
+half sib          & 0.565 & 0.434 & 0.001 & \textbf{0.530} & \textbf{0.466} & 0.004 & $.5,.5,0$ \\
+first cousin      & 0.794 & 0.204 & 0.002 & \textbf{0.742} & \textbf{0.255} & 0.003 & $.75,.25,0$ \\
+\midrule
+\multicolumn{7}{@{}l}{RMSE over 50 pairs $\times$ 3 parameters} & \\
+\multicolumn{3}{@{}l}{} & 0.03049 & \multicolumn{3}{l}{\textbf{0.01737}} & \textbf{43\% lower} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+First cousins go from $0.794$ to $0.742$ against a truth of $0.75$, and full sibs from $0.264$ to $0.253$
+against $0.25$. Half sibs improve from $0.565$ to $0.530$ but remain the worst case --- so the correction
+removes most of the attenuation, not all of it. Duplicates and parent--offspring are unaffected, as they
+should be: they were already exact.
+
+\textbf{And it is free.} Timed over three runs of the implementation described in \S5.2:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+ & wall (16 threads) & wall (1 thread) \\
+\midrule
+\texttt{-{}-no-loo}            & 0.83--0.86\,s & 6.10\,s \\
+leave-one-out (default) & 0.82--0.86\,s & 6.03\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Within run-to-run noise, single- or multi-threaded. The downdate adds $O(M(k{+}1)^2)$ per pair against the
+$O(M(k{+}1))$ it replaces --- with $k+1=2$, four multiply--adds per site instead of two --- which disappears
+beside reading the \texttt{.bed} and running the EM. There is no reason not to make it the default, and it
+is.
+
+\medskip\noindent
+\textbf{What remains.} Half sibs at $0.530$ for a truth of $0.5$. The pair is now out of the frequency
+regression, but it is still in the PCA that produced the scores $V$; removing it there too would mean
+recomputing the decomposition per pair, which is not free in the way this is. Whether that residual
+$0.03$ is worth chasing is a separate question, and it should be measured on a cohort with more than
+126 individuals before anyone tries.
+
+\subsection{Architecture: a second program}
+
+\textbf{Everything needed is already in PCAone's published output.} This is the fact that decides the
+question, and it is not obvious --- $\hat\pi$ looks like an internal quantity, and
+\texttt{-{}-evaladmix} never actually forms it (the Gram-matrix identity lets it avoid doing so). But
+\begin{equation*}
+\hat\pi \;=\; \tfrac12\,V(V^{\!\top}V)^{-1}V^{\!\top}G,\qquad V=[\,\mathrm{PC}_1\ldots\mathrm{PC}_{K-1},\ \mathbf 1\,]
+\end{equation*}
+needs only the PC scores and the genotypes --- and the genotypes are needed for the likelihood regardless.
+So \texttt{.eigvecs} plus the \texttt{.bed} is sufficient; the singular values and loadings are not required,
+and neither is any PCAone internal.
+
+Confirmed by building exactly that: a program reading only \texttt{recon.eigvecs}, \texttt{recon.kinship} and
+the PLINK files reproduces the estimates \emph{identically} --- duplicates $(0,0,1)$, parent--offspring
+$(0,1,0)$, full sibs $(0.264,0.496,0.240)$, matching the in-process prototype to three decimals.
+
+\medskip\noindent
+Given that, a separate program is the better structure:
+
+\begin{tightitem}
+  \item The work is a \textbf{different computational shape}: a per-pair EM over a sparse list of $O(N)$
+  pairs, not streaming matrix algebra over sites. It shares no machinery with PCAone's inner loop beyond
+  reading genotypes.
+  \item It adds \textbf{no new $N\times N$ state} to PCAone and no second pass to its control flow.
+  \item Anyone with existing PCAone output can run it \textbf{without redoing the PCA}.
+  \item \textbf{The statistics are not settled} --- the attenuation at half sibs, the choice of
+  $\hat\pi_{ij}$, whether a leave-one-out refinement helps. Iterating on those should not require rebuilding
+  and reshipping a PCA tool. The working prototype above is about forty lines.
+\end{tightitem}
+
+\noindent
+This reverses the recommendation in the first draft of this note, which argued for a second pass inside
+PCAone. That argument rested on the assumption that $\hat\pi$ was only available internally. It is not.
+
+\paragraph{One change to PCAone is required.} The second program must apply \emph{exactly} the site filter
+the PCA used, or $\hat\pi$ will not correspond to the PCs. PCAone already solves this with \texttt{.mbim},
+which lists the retained sites and their allele frequencies --- but \textbf{only a run with \texttt{-D/-{}-ld}
+writes one}. \texttt{-{}-evaladmix} should call \texttt{save\_snps\_in\_mbim()} as well. That is a one-line
+change and it is the only coupling needed.
+
+\paragraph{Interface.}
+\begin{quote}\ttfamily\small
+PCAone -b plink -k <K-1> -{}-evaladmix -o pcs\\
+pcaone-ibd -b plink -P pcs -{}-min-kin 0.05 -o rel
+\end{quote}
+reading \texttt{pcs.eigvecs}, \texttt{pcs.kinship} and \texttt{pcs.mbim}, and writing \texttt{rel.ibd}: one
+row per surviving pair, \texttt{ID1 ID2 kin k0 k1 k2 nsnp}. A sparse list rather than a matrix, which is the
+honest representation given that $k$ is meaningless for the $99.4\%$ of pairs that are unrelated.
+
+\paragraph{The alternative, if a single binary is preferred.} PCAone already has a two-invocation idiom via
+\texttt{-P/-{}-USV} --- it is how the ancestry-adjusted LD path works. A mode
+\texttt{PCAone -b plink -P pcs -{}-ibd-probs} would reuse the existing genotype readers and \texttt{.mbim}
+handling for free, at the cost of a rebuild whenever the statistics change. Reasonable once they stabilise;
+the wrong order in which to do it now.
+
+\section{Open questions}
+
+\begin{tightitem}
+  \item $\hat\pi_{ij}=\tfrac12(\hat\pi_i+\hat\pi_j)$ is a choice, not a derivation. Under an admixture model
+  the IBD allele comes from one ancestral population, which $\hat\pi$ alone cannot identify. The mean works
+  well here; it is untested where ancestries are more extreme than this dataset's.
+  \item Everything measured is $N=126$, $K=2$, complete data, one pedigree. The claim that related pairs are
+  $O(N)$ is a property of real cohorts, not of this dataset; a cohort with large families would change the
+  cost.
+  \item The leave-one-out correction removes most of the attenuation but not all of it: half sibs remain at
+  $k_0=0.530$ against a truth of $0.5$. The residue comes from the pair still being inside the PCA itself,
+  which a per-pair downdate cannot reach.
+  \item A threshold of $0.05$ excludes second cousins by construction. That is defensible --- their $k_2$ is
+  noise --- but it should be stated in the output rather than left implicit.
+\end{tightitem}
+
+\end{document}
