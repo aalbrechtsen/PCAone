@@ -94,7 +94,7 @@ The right strategy depends on $N$. What limits each regime is different:
 
 ##### Large $N$
 
-($N\le20{,}000$; `dwg`, operator engine). Relatives no longer move the top ancestry axes, but they misplace themselves and create family axes just beyond them (Section 9). The operator engine forms no $N\times N$ matrix: each iteration is one pass over the genotypes, with the GRM-scale weights applied to the small product $G'V$. KING over all pairs uses popcounts of bit-packed genotypes (6.5 s at $N=20{,}000$); the exact GRM-scale entries of the candidate pairs come from one weighted pass.
+($N\le20{,}000$; `dwg`, operator engine). Relatives no longer move the top ancestry axes, but they misplace themselves and create family axes just beyond them (Section 10). The operator engine forms no $N\times N$ matrix: each iteration is one pass over the genotypes, with the GRM-scale weights applied to the small product $G'V$. KING over all pairs uses popcounts of bit-packed genotypes (6.5 s at $N=20{,}000$); the exact GRM-scale entries of the candidate pairs come from one weighted pass.
 
 ![image](methods/regime_verylarge.png)
 
@@ -102,7 +102,7 @@ The right strategy depends on $N$. What limits each regime is different:
 
 ##### Very large $N$
 
-($N>20{,}000$; `dwg` with the sketch search). KING over all pairs costs $N^2M/64$ popcounts. At $N=100{,}000$ it takes longer than the whole PCA. It is replaced by a nearest-neighbour search in a sketch (Section 7.1), which finds exactly the same related pairs. Its cost is $N^2s$ with $s=2048$, independent of the number of SNPs. The same sketch, with the structure axes projected out, gives the candidates of the evalAdmix screen (Section 5.3). At $N=100{,}000$, `dwg` takes 226 s in-core (`detect-white` 118 s, standard PCAone 148 s): the residual-sketch neighbour search of the screen costs about 50 s, plus one refit when first cousins pass the screen.
+($N>20{,}000$; `dwg` with the sketch search). KING over all pairs costs $N^2M/64$ popcounts. At $N=100{,}000$ it takes longer than the whole PCA. It is replaced by a nearest-neighbour search in a sketch (Section 8.1), which finds exactly the same related pairs. Its cost is $N^2s$ with $s=2048$, independent of the number of SNPs. The same sketch, with the structure axes projected out, gives the candidates of the evalAdmix screen (Section 5.3). At $N=100{,}000$, `dwg` takes 226 s in-core (`detect-white` 118 s, standard PCAone 148 s): the residual-sketch neighbour search of the screen costs about 50 s, plus one refit when first cousins pass the screen.
 
 ## 3 The small-$N$ problem: the diagonal and the relatives
 
@@ -295,7 +295,7 @@ Two steps.
 
   - The cap protects against overshooting when $k$ is right: unremoved first cousins can push an extra eigenvalue above the edge.
 
-- **Scales to large $N$.** Every step works with a few vectors at a time, so the operator engine runs it matrix-free (Section 7).
+- **Scales to large $N$.** Every step works with a few vectors at a time, so the operator engine runs it matrix-free (Section 8).
 
 ### 5.3 `dwg`: `detect-white` on the GRM scale
 
@@ -532,7 +532,48 @@ After the final PCs, one more pass over the genotypes therefore estimates the re
 
 **Table 8.** Final relatedness (means), from the `.relpairs` output. In the simulation (unlinked SNPs, 30% in families, `detect-white`, $k=4$), the relationship types are fully separated by $k_0$ (sd 0.011 for full sibs). In the small real-data-based set (`aarobust-kin` `--impute-diag`, $k=2$; relatives made from real genotypes with recombination, so the realised relatedness varies around the pedigree value), parent–offspring and full sibs are again separated. The 2nd-degree kinship is about 0.02 too high there, with a small spurious $k_2$. The evalAdmix kinship of the same pairs is biased the other way at this $N$: on average 0.22 for the 1st-degree pairs, because it has no leave-out.
 
-## 7 Engines
+## 7 Genotype likelihoods (`-G`)
+
+`--robust` also runs on genotype likelihoods (BEAGLE input), as `dwg` in the dense engine and in-core:
+
+      PCAone -G data.beagle.gz -k 3 --robust -o out
+
+##### The problem.
+
+Without genotype calls the matrix is built from posterior genotype means $E_{is}=\mathrm{E}[g_{is}\mid\text{reads}]$. These shrink towards the prior, more for individuals with low depth, so the structure of a low-depth individual is pulled towards the centre and the covariance of two relatives is attenuated. The diagonal ($\mathrm{E}[g^2]\ne
+\mathrm{E}[g]^2$) is no problem: it is free in `dwg`.
+
+##### The method.
+
+1.  *Prior and posteriors.* Allele frequencies $f$ by EM from the likelihoods; posteriors with the HWE prior $f$; the genotype reliability of each individual, $\rho_i=1-\sum_s\mathrm{Var}(g_{is}\mid\text{reads})/\sum_s2f_s(1-f_s)$.
+
+2.  *Deshrinking.* $x_{is}=2f_s+(E_{is}-2f_s)/\rho_i$. With the linear shrinkage $E\approx2f+\rho_i(g-2f)$ the off-diagonal cross-products of $x$ are approximately unbiased for those of the genotypes; the extra noise goes to the free diagonal.
+
+3.  *`dwg` on $x$* (GRM scale, noise edge from $x$). The kinship rule uses $\hat\phi_{ij}/\sqrt{\rho_i\rho_j}$, because the residual noise of a low-depth individual is inflated; the whitening uses the observed covariance.
+
+4.  *Candidates.* KING from expected counts (posterior probabilities of het–het and opposite homozygotes) and the evalAdmix screen on $x$, both corrected by $\sqrt{\rho_i\rho_j}$. A candidate found only by evalAdmix must have $k_0<0.8$, estimated from the likelihoods themselves: the IBD likelihood of `pcaone-ibd` summed over the genotypes, $\sum_{g_i,g_j}\mathrm{GL}_i(g_i)\mathrm{GL}_j(g_j)
+        P(g_i,g_j\mid\text{IBD state},\pi_i,\pi_j)$.
+
+5.  *Final relatedness.* $(k_0,k_1,k_2)$ by maximum likelihood from the genotype likelihoods (projected Newton), with leave-the-family-out individual allele frequencies from the final PCs; $\phi=k_1/4+k_2/2$.
+
+##### Choosing the prior.
+
+Iterating the prior from the PCs (individual allele frequencies, as in PCAngsd) was worse: at small $N$ an individual’s own genotypes enter its prior and reinforce noise; leaving the individual out made the prior too unstable (up to 10 false pairs per dataset at $n=5$). One round with the HWE prior and deshrinking is both the best and the simplest, and it needs no $k$.
+
+|                                                 | failures $n=10$ (2 / 4 / 8$\times$) | failures $n=5$ (2 / 4 / 8$\times$) | recall |
+|:------------------------------------------------|:-----------------------------------:|:----------------------------------:|:------:|
+| true genotypes (`dwg`)                          |                  0                  |                 0                  | 95–98% |
+| **`dwg`, genotype likelihoods (deshrunk)**      |            **0 / 0 / 0**            |        **19% / 12.5% / 6%**        | 93–98% |
+| IAF prior, 3 rounds                             |           12.5% / 6% / 6%           |          88% / 25% / 25%           | 84–98% |
+| standard PCA of posterior means (PCAngsd style) |          100% / 100% / 94%          |                100%                |   –    |
+
+**Table 9.** Genotype likelihoods from simulated reads (depth per individual Gamma-distributed around the mean, 1% error) on the admixTjeck2 benchmark (54k SNPs, 8 scenarios incl. relatives of different ancestry, $k=3$). Mean genotype reliability: 0.35, 0.54, 0.73 and 0.89 at 1, 2, 4 and 8$\times$. At $1\times$ no variant works with few individuals per population. PCAone reproduces the Python prototype (`dwg_gl.py`) exactly: identical pairs and $|\cos|=1$ per PC on 24 datasets at 2, 4 and 8$\times$.
+
+##### Final relatedness at $4\times$.
+
+Full sibs (0.24, 0.53, 0.23) and 2nd-degree pairs (0.49, 0.51, 0.00) are estimated well; parent–offspring get $k_2\approx0.07$ too high (kinship 0.26–0.27) and a child of mixed ancestry $k_0\approx0.09$ with each parent.
+
+## 8 Engines
 
 ![image](methods/engines.png)
 
@@ -552,7 +593,7 @@ This is used for $N>5000$, or with `--robust-engine` `operator`. No $N\times N$ 
 
 1.  *Pass 1.* Compute $D$, the diagonal of $A$ and the noise edge, and store the genotypes as three bit masks per individual (heterozygous, hom 0, hom 2): $3NM/8$ bytes.
 
-2.  *Candidate pairs.* Up to $N=20{,}000$: KING over all pairs, popcounts in tiles of 128 individuals over all threads, keeping only the pairs above 0.04. Above that: the sketch search of Section 7.1 (`--king-search`). The Gram entries of the candidate pairs also come from popcounts. With `--kinship`, the supplied pairs are used and no search is done.
+2.  *Candidate pairs.* Up to $N=20{,}000$: KING over all pairs, popcounts in tiles of 128 individuals over all threads, keeping only the pairs above 0.04. Above that: the sketch search of Section 8.1 (`--king-search`). The Gram entries of the candidate pairs also come from popcounts. With `--kinship`, the supplied pairs are used and no search is done.
 
 3.  *Fit.* Each iteration is *one pass* over the genotypes, $Z=G(G'V)$ for a block of $k+6$ vectors, with the SNPs split over threads. It is followed by a Rayleigh–Ritz step on $H-S$ and an update of $L$ and $S$ on the diagonal and the candidate entries.
 
@@ -566,7 +607,7 @@ In-core and out-of-core give the same results. Out-of-core re-reads the file in 
 
 With `--robust-pcs` `winsvd`, the final PCs of the whitening modes come from PCAone’s window-based randomized SVD (`--svd` 2) instead of the operator iteration. It runs on the whitened raw genotypes $\Sigma^{-1/2}G$, with $\Sigma^{-1/2}$ applied to every block as it is read (or once in place in-core). It computes $k+1$ components, drops the first and maps back by $\Sigma^{1/2}$. The PCs are the same ($|\cos|\ge0.99999$ at $N=20{,}000$), but it is not faster: the operator iteration is warm-started and needs only a few passes, while most of the passes go to the detection fit (about 20 of 26). The default therefore stays `operator`.
 
-### 7.1 Very large $N$: finding the relatives with a sketch
+### 8.1 Very large $N$: finding the relatives with a sketch
 
 KING over all pairs costs $N^2M/64$ popcounts: 6.5 s at $N=20{,}000$ and 162 s at $N=100{,}000$ ($M=20{,}000$), and it grows with $M$. Above `--king-sketch-min` (20,000) it is replaced by a nearest-neighbour search.
 
@@ -584,7 +625,7 @@ No population-structure correction is needed: removing the top PCs from the sket
 
 - bucketing (LSH) cannot work, because a 2nd-degree pair agrees on only 53–59% of the sign bits, against 50% for unrelated pairs.
 
-## 8 Usage and output
+## 9 Usage and output
 
       PCAone -b data -k 3 --robust                    # auto: dwg
       PCAone -b data -k 3 --robust --impute-diag      # aarobust-kin, diagonal imputed
@@ -593,6 +634,7 @@ No population-structure correction is needed: removing the top PCs from the sket
       PCAone -b data -k 3 --robust --kinship pairs.kin0  # known family pairs
       PCAone -b data -k 10 --robust detect-white -m 2  # out-of-core, 2 GB
       PCAone -b data -k 4 --robust --king-search sketch  # sketch, any N
+      PCAone -G data.beagle.gz -k 3 --robust             # genotype likelihoods
 
 | option                | default    | meaning                                                                 |
 |:----------------------|:-----------|:------------------------------------------------------------------------|
@@ -637,7 +679,7 @@ Output files:
 
 In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 and 0.133, against pedigree values 0.25, 0.25, 0.5, 0.25, 0.125 and 0.125.
 
-## 9 Evidence so far
+## 10 Evidence so far
 
 ##### Correctness.
 
@@ -754,17 +796,17 @@ CEU, CHB, YRI and the admixed ASW (366 individuals, 100k complete SNPs); relativ
 
 - **Very large $N$ (operator + sketch):** $N=100{,}000$: 118 s including the final relatedness, against 148 s for standard PCAone.
 
-## 10 Limitations and next steps
+## 11 Limitations and next steps
 
 - **Missing genotypes** are not supported yet: `--robust` stops if any genotype is missing. This is needed for real large data.
 
-- **Out-of-core** runs need about 25–30 passes over the file: 135 s at $N=20{,}000$, against 20 s in-core, and 29 s for standard PCAone out-of-core. Most passes go to the detection fit. Moving the final PCs to winSVD does not help (Section 7); fewer detection passes (block Krylov, or a sketch of $GG'$ from the first pass) would.
+- **Out-of-core** runs need about 25–30 passes over the file: 135 s at $N=20{,}000$, against 20 s in-core, and 29 s for standard PCAone out-of-core. Most passes go to the detection fit. Moving the final PCs to winSVD does not help (Section 8); fewer detection passes (block Krylov, or a sketch of $GG'$ from the first pass) would.
 
 - **The sketch search** is still quadratic in $N$ ($N^2s$): about 20 min at $N=500{,}000$ and 1.5 h at $N=10^6$ on 16 threads (extrapolated). The bit-packed genotypes ($3NM/8$ bytes) are kept in memory for the KING check.
 
 - **Linkage.** Checked at $N=5000$ on HAPNEST (realistic LD, relatives with recombination); the $N=100{,}000$ tests still use unlinked SNPs.
 
-- **Genotype likelihoods** are not supported (genotype calls only).
+- **Genotype likelihoods** (Section 7) run in the dense engine, in-core, `dwg` only; parent–offspring $k_2$ is slightly overestimated at low depth, and the evalAdmix kinship column is not computed for them.
 
 - **Final relatedness at small $N$**: 2nd-degree kinship about 0.02 too high in the $N=47$ real-data set (Table 8).
 

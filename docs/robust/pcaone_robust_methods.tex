@@ -986,6 +986,82 @@ average 0.22 for the 1st-degree pairs, because it has no leave-out.}
 \label{tab:finalrel}
 \end{table}
 
+\section{Genotype likelihoods (\texttt{-G})}
+\label{sec:gl}
+
+\opt{robust} also runs on genotype likelihoods (BEAGLE input), as
+\texttt{dwg} in the dense engine and in-core:
+\begin{verbatim}
+  PCAone -G data.beagle.gz -k 3 --robust -o out
+\end{verbatim}
+
+\paragraph{The problem.} Without genotype calls the matrix is built from
+posterior genotype means $E_{is}=\mathrm{E}[g_{is}\mid\text{reads}]$. These
+shrink towards the prior, more for individuals with low depth, so the
+structure of a low-depth individual is pulled towards the centre and the
+covariance of two relatives is attenuated. The diagonal ($\mathrm{E}[g^2]\ne
+\mathrm{E}[g]^2$) is no problem: it is free in \texttt{dwg}.
+
+\paragraph{The method.}
+\begin{enumerate}
+  \item \emph{Prior and posteriors.} Allele frequencies $f$ by EM from the
+    likelihoods; posteriors with the HWE prior $f$; the genotype reliability
+    of each individual,
+    $\rho_i=1-\sum_s\mathrm{Var}(g_{is}\mid\text{reads})/\sum_s2f_s(1-f_s)$.
+  \item \emph{Deshrinking.} $x_{is}=2f_s+(E_{is}-2f_s)/\rho_i$. With the
+    linear shrinkage $E\approx2f+\rho_i(g-2f)$ the off-diagonal
+    cross-products of $x$ are approximately unbiased for those of the
+    genotypes; the extra noise goes to the free diagonal.
+  \item \emph{\texttt{dwg} on $x$} (GRM scale, noise edge from $x$). The
+    kinship rule uses $\hat\phi_{ij}/\sqrt{\rho_i\rho_j}$, because the
+    residual noise of a low-depth individual is inflated; the whitening uses
+    the observed covariance.
+  \item \emph{Candidates.} KING from expected counts (posterior
+    probabilities of het--het and opposite homozygotes) and the evalAdmix
+    screen on $x$, both corrected by $\sqrt{\rho_i\rho_j}$. A candidate found
+    only by evalAdmix must have $k_0<0.8$, estimated from the likelihoods
+    themselves: the IBD likelihood of \texttt{pcaone-ibd} summed over the
+    genotypes, $\sum_{g_i,g_j}\mathrm{GL}_i(g_i)\mathrm{GL}_j(g_j)
+    P(g_i,g_j\mid\text{IBD state},\pi_i,\pi_j)$.
+  \item \emph{Final relatedness.} $(k_0,k_1,k_2)$ by maximum likelihood from
+    the genotype likelihoods (projected Newton), with leave-the-family-out
+    individual allele frequencies from the final PCs; $\phi=k_1/4+k_2/2$.
+\end{enumerate}
+
+\paragraph{Choosing the prior.} Iterating the prior from the PCs (individual
+allele frequencies, as in PCAngsd) was worse: at small $N$ an individual's own
+genotypes enter its prior and reinforce noise; leaving the individual out made
+the prior too unstable (up to 10 false pairs per dataset at $n=5$). One round
+with the HWE prior and deshrinking is both the best and the simplest, and it
+needs no $k$.
+
+\begin{table}[htbp]
+\centering\small
+\fitbox{\begin{tabular}{@{}lccc@{}}
+\toprule
+ & failures $n=10$ (2 / 4 / 8$\times$) & failures $n=5$ (2 / 4 / 8$\times$) & recall \\
+\midrule
+true genotypes (\texttt{dwg}) & 0 & 0 & 95--98\% \\
+\textbf{\texttt{dwg}, genotype likelihoods (deshrunk)} & \textbf{0 / 0 / 0} & \textbf{19\% / 12.5\% / 6\%} & 93--98\% \\
+IAF prior, 3 rounds & 12.5\% / 6\% / 6\% & 88\% / 25\% / 25\% & 84--98\% \\
+standard PCA of posterior means (PCAngsd style) & 100\% / 100\% / 94\% & 100\% & -- \\
+\bottomrule
+\end{tabular}}
+\caption{Genotype likelihoods from simulated reads (depth per individual
+Gamma-distributed around the mean, 1\% error) on the admixTjeck2 benchmark
+(54k SNPs, 8 scenarios incl.\ relatives of different ancestry, $k=3$).
+Mean genotype reliability: 0.35, 0.54, 0.73 and 0.89 at 1, 2, 4 and
+8$\times$. At $1\times$ no variant works with few individuals per population.
+PCAone reproduces the Python prototype (\texttt{dwg\_gl.py}) exactly: identical
+pairs and $|\cos|=1$ per PC on 24 datasets at 2, 4 and 8$\times$.}
+\label{tab:gl}
+\end{table}
+
+\paragraph{Final relatedness at $4\times$.} Full sibs (0.24, 0.53, 0.23) and
+2nd-degree pairs (0.49, 0.51, 0.00) are estimated well; parent--offspring get
+$k_2\approx0.07$ too high (kinship 0.26--0.27) and a child of mixed ancestry
+$k_0\approx0.09$ with each parent.
+
 \section{Engines}
 \label{sec:engines}
 
@@ -1093,6 +1169,7 @@ Two cheaper variants failed in the prototype (\texttt{relfind\_bits.py}):
   PCAone -b data -k 3 --robust --kinship pairs.kin0  # known family pairs
   PCAone -b data -k 10 --robust detect-white -m 2  # out-of-core, 2 GB
   PCAone -b data -k 4 --robust --king-search sketch  # sketch, any N
+  PCAone -G data.beagle.gz -k 3 --robust             # genotype likelihoods
 \end{verbatim}
 
 \begin{table}[h]
@@ -1349,7 +1426,10 @@ genotype products 17--20\,s.}
   \item \textbf{Linkage.} Checked at $N=5000$ on HAPNEST (realistic LD,
     relatives with recombination); the $N=100{,}000$ tests still use unlinked
     SNPs.
-  \item \textbf{Genotype likelihoods} are not supported (genotype calls only).
+  \item \textbf{Genotype likelihoods} (Section~\ref{sec:gl}) run in the dense
+    engine, in-core, \texttt{dwg} only; parent--offspring $k_2$ is slightly
+    overestimated at low depth, and the evalAdmix kinship column is not
+    computed for them.
   \item \textbf{Final relatedness at small $N$}: 2nd-degree kinship about
     0.02 too high in the $N=47$ real-data set (Table~\ref{tab:finalrel}).
   \item \textbf{The rank choice} could be offered to the rest of PCAone.
