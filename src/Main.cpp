@@ -135,7 +135,12 @@ int main(int argc, char* argv[]) {
   if (!params.robust.empty()) {
     params.center = false;  // raw {0, 0.5, 1}; the out-of-core reader is handled in run_robust
     params.perm = false;
-    data = (params.file_t == FileType::PLINK) ? (Data*)new FileBed(params) : (Data*)new FilePgen(params);
+    if (params.file_t == FileType::PLINK)
+      data = new FileBed(params);
+    else if (params.file_t == FileType::PGEN)
+      data = new FilePgen(params);
+    else
+      data = new FileBeagle(params);  // genotype likelihoods (dwg only, in-core)
     data->prepare();
     if (params.robust == "auto") {
       // dwg (dense or operator engine); --impute-diag belongs to aarobust-kin
@@ -154,7 +159,7 @@ int main(int argc, char* argv[]) {
     if (params.file_t == FileType::PLINK)
       make_plink2_eigenvec_file(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
                                 params.filein + ".fam");
-    else
+    else if (params.file_t == FileType::PGEN)
       make_plink2_eigenvec_from_psam(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
                                      params.filein + ".psam");
     return bye();

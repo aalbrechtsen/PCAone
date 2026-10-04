@@ -1135,10 +1135,11 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
 }
 
 static void write_outputs(Data* data, const Param& params, Eigen::Index N, const Mat2D& U, const Mat1D& w,
-                          const std::vector<Pair>& pairs, const std::function<double(int, int)>& king_of) {
+                          const std::vector<Pair>& pairs, const std::function<double(int, int)>& king_of,
+                          const std::vector<FinalRel>* fin_in = nullptr) {
   write_matrix(params.fileout + ".eigvecs", U);
   write_matrix(params.fileout + ".eigvals", w);
-  const std::vector<FinalRel> fin = final_relatedness(data, params, U, pairs);
+  const std::vector<FinalRel> fin = fin_in ? *fin_in : final_relatedness(data, params, U, pairs);
   String1D ids = read_sample_ids(params);
   std::ofstream rp(params.fileout + ".relpairs");
   // KING: KING-robust; KIN_DETECT: kinship of the detection step (decides the
@@ -1467,8 +1468,12 @@ struct DwgFit {
   Mat2D axes;  // structure axes (family axes dropped), for the evalAdmix screen
 };
 
-static DwgFit dwg_fit(const Mat2D& A, double tau, MatB cand, double edge, int rmax, int maxit = 500) {
+// rho (optional): per-individual factor on the noise in the kinship rule
+// (genotype reliability with genotype likelihoods; 1 for genotypes)
+static DwgFit dwg_fit(const Mat2D& A, double tau, MatB cand, double edge, int rmax, int maxit = 500,
+                      const Mat1D& rho_in = Mat1D()) {
   const Eigen::Index n = A.rows();
+  const Mat1D rho = rho_in.size() == n ? rho_in : Mat1D::Ones(n);
   DwgFit F;
   F.S = Mat2D::Zero(n, n);
   Mat2D Vb = rand_orth(n, std::min<Eigen::Index>(n, rmax + 7), 3);
@@ -1479,7 +1484,7 @@ static DwgFit dwg_fit(const Mat2D& A, double tau, MatB cand, double edge, int rm
       top_eig_warm(A - F.S, r, Vb, F.w, F.V);
       F.L.noalias() = F.V * F.w.asDiagonal() * F.V.transpose();
       const Mat2D R = A - F.L;
-      const Mat1D v = R.diagonal().cwiseMax(1e-6);
+      const Mat1D v = R.diagonal().cwiseMax(1e-6).cwiseProduct(rho);
       const MatB sel = kin_select(R, v, tau, cand);
       F.S = sel.select(R, Mat2D::Zero(n, n));
       F.S.diagonal() = R.diagonal();
@@ -1493,7 +1498,7 @@ static DwgFit dwg_fit(const Mat2D& A, double tau, MatB cand, double edge, int rm
     if (w2(r) <= edge) break;
     const Mat2D R = A - F.L;
     std::vector<int> top;
-    if (dwg_family_axis(V2.col(r), R, R.diagonal().cwiseMax(1e-6), top)) {
+    if (dwg_family_axis(V2.col(r), R, R.diagonal().cwiseMax(1e-6).cwiseProduct(rho), top)) {
       bool added = false;
       for (size_t a = 0; a < top.size(); ++a)
         for (size_t b = a + 1; b < top.size(); ++b)
@@ -1514,7 +1519,7 @@ static DwgFit dwg_fit(const Mat2D& A, double tau, MatB cand, double edge, int rm
   for (int j = 1; j < r; ++j) {
     const Mat2D Rj = R + F.w(j) * F.V.col(j) * F.V.col(j).transpose();
     std::vector<int> top;
-    if (!dwg_family_axis(F.V.col(j), Rj, Rj.diagonal().cwiseMax(1e-6), top)) keep.push_back(j);
+    if (!dwg_family_axis(F.V.col(j), Rj, Rj.diagonal().cwiseMax(1e-6).cwiseProduct(rho), top)) keep.push_back(j);
   }
   if (keep.empty() && r > 1) keep.push_back(1);
   F.axes = Mat2D(n, keep.size());
@@ -2082,7 +2087,265 @@ static void run_dwg_operator(Data* data, const Param& params) {
   });
 }
 
+
+// ---- dwg with genotype likelihoods (BEAGLE input, dense engine) ---------------
+// (scripts/relatepca/dwg_gl.py, deshrink variant). Posteriors with the sample
+// allele frequencies as prior; the posterior means E shrink towards the prior
+// by the individual's genotype reliability rho_i = 1 - sum Var(g|data) /
+// sum 2f(1-f), so they are deshrunk, x = 2f + (E - 2f) / rho_i, which makes
+// the off-diagonal cross-products approximately unbiased (the extra noise
+// goes to the free diagonal). The kinship rule uses the noise times rho
+// (phi / sqrt(rho_i rho_j)); the whitening uses the observed covariance.
+// Candidates: KING from expected counts (posterior probabilities) and the
+// evalAdmix screen on x, both corrected by sqrt(rho_i rho_j); evalAdmix-only
+// candidates are confirmed by k0 < 0.8 from the genotype likelihoods. Final
+// relatedness: (k0, k1, k2) by maximum likelihood from the likelihoods with
+// leave-the-family-out allele frequencies from the final PCs.
+
+// per-site IBD likelihoods of a pair from genotype likelihoods (allele-level
+// model of pcaone-ibd summed over the genotypes); gi, gj: (GL0, GL1, GL2)
+static inline void gl_pair_lik(const double* gi, const double* gj, double pa, double pb, double* l) {
+  const double qa = 1 - pa, qb = 1 - pb, ps = 0.5 * (pa + pb), qs = 1 - ps;
+  const double ha[3] = {qa * qa, 2 * pa * qa, pa * pa}, hb[3] = {qb * qb, 2 * pb * qb, pb * pb};
+  const double hs[3] = {qs * qs, 2 * ps * qs, ps * ps};
+  double ai = 0, aj = 0, l2 = 0;
+  for (int g = 0; g < 3; ++g) {
+    ai += gi[g] * ha[g];
+    aj += gj[g] * hb[g];
+    l2 += gi[g] * gj[g] * hs[g];
+  }
+  // IBD1: shared allele S; P(g | S) = P(other allele = g - S)
+  const double i0 = gi[0] * qa + gi[1] * pa, i1 = gi[1] * qa + gi[2] * pa;
+  const double j0 = gj[0] * qb + gj[1] * pb, j1 = gj[1] * qb + gj[2] * pb;
+  l[0] = ai * aj;
+  l[1] = qs * i0 * j0 + ps * i1 * j1;
+  l[2] = l2;
+}
+
+static void run_dwg_gl(Data* data, const Param& params) {
+  const Eigen::Index N = data->nsamples, M = data->nsnps;
+  const int k = params.k;
+  const double tau = params.kin_min;
+  cao.print(tick.date(), "robust PCA ( dwg, genotype likelihoods ): N =", N, ", M =", M, ", k =", k);
+  tick.clock();
+  auto col = [&](Eigen::Index j) { return (Eigen::Index)(params.filterSNP ? data->keepSNPs[j] : j); };
+  const Mat2D& P = data->P;
+  // genotype likelihoods as N x M x 3 (contiguous per individual-site)
+  std::vector<double> GL(N * M * 3);
+#pragma omp parallel for num_threads(params.threads)
+  for (Eigen::Index j = 0; j < M; ++j) {
+    const Eigen::Index s = col(j);
+    for (Eigen::Index i = 0; i < N; ++i) {
+      double* g = &GL[(i * M + j) * 3];
+      g[0] = P(2 * i, s);
+      g[1] = P(2 * i + 1, s);
+      g[2] = std::max(0.0, 1.0 - g[0] - g[1]);
+    }
+  }
+  // allele frequencies by EM from 0.25 (as emMAF_with_GL; data->F is not
+  // estimated here, because PCAone sets maxiter = 0 outside EMU/PCAngsd mode)
+  Mat1D f = Mat1D::Constant(M, 0.25);
+  for (int it = 0; it < 100; ++it) {
+    Mat1D fn(M);
+#pragma omp parallel for num_threads(params.threads)
+    for (Eigen::Index j = 0; j < M; ++j) {
+      const double q = f(j), h0 = (1 - q) * (1 - q), h1 = 2 * q * (1 - q), h2 = q * q;
+      double t = 0;
+      for (Eigen::Index i = 0; i < N; ++i) {
+        const double* g = &GL[(i * M + j) * 3];
+        const double a = g[0] * h0, b = g[1] * h1, c = g[2] * h2;
+        t += (b + 2 * c) / (a + b + c);
+      }
+      fn(j) = t / (2.0 * N);
+    }
+    const double d = std::sqrt((fn - f).squaredNorm() / M);
+    f = fn;
+    if (d < 1e-6) break;
+  }
+  f = f.cwiseMax(1e-4).cwiseMin(1 - 1e-4);
+  // posteriors with the prior f: E[g], probabilities, and the reliability
+  Mat2D E(N, M), P0(N, M), P1(N, M), P2(N, M);
+  Mat1D varsum = Mat1D::Zero(N), priorsum = Mat1D::Zero(N);
+#pragma omp parallel num_threads(params.threads)
+  {
+    Mat1D vs = Mat1D::Zero(N), ps = Mat1D::Zero(N);
+#pragma omp for
+    for (Eigen::Index j = 0; j < M; ++j) {
+      const double q = f(j), h0 = (1 - q) * (1 - q), h1 = 2 * q * (1 - q), h2 = q * q;
+      for (Eigen::Index i = 0; i < N; ++i) {
+        const double* g = &GL[(i * M + j) * 3];
+        double a = g[0] * h0, b = g[1] * h1, c = g[2] * h2;
+        const double t = a + b + c;
+        a /= t;
+        b /= t;
+        c /= t;
+        P0(i, j) = a;
+        P1(i, j) = b;
+        P2(i, j) = c;
+        E(i, j) = b + 2 * c;
+        vs(i) += b + 4 * c - E(i, j) * E(i, j);
+        ps(i) += h1;
+      }
+    }
+#pragma omp critical
+    {
+      varsum += vs;
+      priorsum += ps;
+    }
+  }
+  const Mat1D rho = (Mat1D::Ones(N) - varsum.cwiseQuotient(priorsum)).cwiseMax(0.02).cwiseMin(1.0);
+  // deshrunk posterior means, the GRM-scale Gram, expected KING counts
+  Mat2D X(N, M);
+  for (Eigen::Index j = 0; j < M; ++j) X.col(j) = (2 * f(j) + (E.col(j).array() - 2 * f(j)) / rho.array()).matrix();
+  const Mat1D w = (2 * f.array() * (1 - f.array())).matrix();
+  const Mat2D Xs = X * w.cwiseSqrt().cwiseInverse().asDiagonal();
+  const Mat2D As = Xs * Xs.transpose() / (double)M;
+  const Mat2D Araw = X * X.transpose();
+  const Mat1D gbar = X.rowwise().mean();
+  const Mat1D dx = (X.array() * (2.0 - X.array())).rowwise().mean().matrix();
+  double edge_sum = 0;
+  for (Eigen::Index j = 0; j < M; ++j) {
+    const double m1 = X.col(j).mean(), m2 = X.col(j).squaredNorm() / N;
+    edge_sum += std::max(m2 * m2 - m1 * m1 * m1 * m1, 0.0) / (w(j) * w(j));
+  }
+  const double edge = 2.0 * std::sqrt(edge_sum / ((double)M * M)) * std::sqrt((double)N);
+  const Mat2D HH = P1 * P1.transpose(), I0 = P0 * P2.transpose() + P2 * P0.transpose();
+  const Mat1D nhet = P1.rowwise().sum();
+  Mat2D king(N, N);
+  for (Eigen::Index j = 0; j < N; ++j)
+    for (Eigen::Index i = 0; i < N; ++i) {
+      const double mn = std::max(std::min(nhet(i), nhet(j)), 1e-9);
+      king(i, j) = ((HH(i, j) - 2.0 * I0(i, j)) / (2.0 * mn) + 0.5 - (nhet(i) + nhet(j)) / (4.0 * mn)) /
+                   std::sqrt(rho(i) * rho(j));
+    }
+  king.diagonal().setZero();
+  MatB cand = (king.array() > params.king_screen).matrix();
+  cao.print(tick.date(), "robust PCA (dwg, GL): posteriors and summaries in", tick.reltime(),
+            "seconds; mean genotype reliability", rho.mean());
+
+  // IAF of individual a and b at every site, given axes, leaving out `out`
+  auto iaf_pair = [&](const Mat2D& axes, int a, int b, const std::vector<int>& out, Mat1D& pa, Mat1D& pb) {
+    Mat2D V(N, axes.cols() + 1);
+    V.leftCols(axes.cols()) = axes;
+    V.col(axes.cols()).setOnes();
+    Mat2D VtV = V.transpose() * V;
+    Mat2D R = V.transpose() * X;
+    for (int t : out) {
+      VtV.noalias() -= V.row(t).transpose() * V.row(t);
+      R.noalias() -= V.row(t).transpose() * X.row(t);
+    }
+    const Mat2D Ai = VtV.completeOrthogonalDecomposition().pseudoInverse();
+    pa = (0.5 * (V.row(a) * Ai * R)).transpose();
+    pb = (0.5 * (V.row(b) * Ai * R)).transpose();
+    pa = pa.cwiseMax(1e-3).cwiseMin(1 - 1e-3);
+    pb = pb.cwiseMax(1e-3).cwiseMin(1 - 1e-3);
+  };
+  auto pair_ibd = [&](int a, int b, const Mat1D& pa, const Mat1D& pb, double* kk, bool exact) {
+    std::vector<double> lik(3 * M);
+    for (Eigen::Index j = 0; j < M; ++j)
+      gl_pair_lik(&GL[(a * M + j) * 3], &GL[(b * M + j) * 3], pa(j), pb(j), &lik[3 * j]);
+    if (exact) {
+      kk[0] = kk[1] = kk[2] = 1.0 / 3.0;
+      ml_ibd(lik, M, kk);
+    } else {  // screen: 30 EM iterations are enough to decide k0 < 0.8
+      double c[3] = {1.0 / 3, 1.0 / 3, 1.0 / 3};
+      for (int it = 0; it < 30; ++it) {
+        double s0 = 0, s1 = 0, s2 = 0;
+        for (Eigen::Index j = 0; j < M; ++j) {
+          const double w0 = c[0] * lik[3 * j], w1 = c[1] * lik[3 * j + 1], w2 = c[2] * lik[3 * j + 2], t = w0 + w1 + w2;
+          if (t > 0) {
+            s0 += w0 / t;
+            s1 += w1 / t;
+            s2 += w2 / t;
+          }
+        }
+        const double tot = s0 + s1 + s2, d = std::fabs(s0 / tot - c[0]);
+        c[0] = s0 / tot;
+        c[1] = s1 / tot;
+        c[2] = s2 / tot;
+        if (d < 1e-4) break;
+      }
+      std::copy(c, c + 3, kk);
+    }
+  };
+
+  DwgFit F = dwg_fit(As, tau, cand, edge, k + 1, 500, rho);
+  MatB used = cand;
+  std::set<std::pair<int, int>> key;
+  for (const auto& [i, j, phi] : F.pairs) key.emplace(i, j);
+  int rounds = 0, n_ea = 0;
+  for (; rounds < 3; ++rounds) {
+    const Mat2D ea = dwg_evaladmix(Araw, gbar, dx, (double)M, F.axes);
+    std::vector<std::pair<int, int>> ce;
+    for (Eigen::Index j = 0; j < N; ++j)
+      for (Eigen::Index i = 0; i < j; ++i)
+        if (ea(i, j) / std::sqrt(rho(i) * rho(j)) > params.king_screen && !used(i, j)) ce.emplace_back(i, j);
+    std::vector<char> ok(ce.size(), 0);
+#pragma omp parallel for num_threads(params.threads) schedule(dynamic)
+    for (size_t c = 0; c < ce.size(); ++c) {
+      Mat1D pa, pb;
+      iaf_pair(F.axes, ce[c].first, ce[c].second, {}, pa, pb);
+      double kk[3];
+      pair_ibd(ce[c].first, ce[c].second, pa, pb, kk, false);
+      ok[c] = kk[0] < DWG_K0_MAX;
+    }
+    MatB c2 = used;
+    n_ea = 0;
+    for (size_t c = 0; c < ce.size(); ++c)
+      if (ok[c]) {
+        c2(ce[c].first, ce[c].second) = c2(ce[c].second, ce[c].first) = true;
+        ++n_ea;
+      }
+    if (c2 == used) break;
+    used = c2;
+    F = dwg_fit(As, tau, c2, edge, k + 1, 500, rho);
+    std::set<std::pair<int, int>> nk;
+    for (const auto& [i, j, phi] : F.pairs) nk.emplace(i, j);
+    if (nk == key) break;
+    key = nk;
+  }
+  cao.print(tick.date(), "robust PCA (dwg, GL): rank", F.r, "(at most", k + 1, ", noise edge", edge, "),",
+            F.pairs.size(), "related pairs;", n_ea, "candidates added by evalAdmix + k0;", rounds + 1, "screen rounds");
+  const Mat1D noise = (As.diagonal() - F.L.diagonal()).cwiseMax(1e-6);
+  Mat1D wv;
+  Mat2D U;
+  whitened_cs(As, noise, F.pairs, k, wv, U, F.r);
+
+  // final relatedness from the genotype likelihoods, leave-the-family-out IAF
+  std::vector<int> root(N);
+  std::iota(root.begin(), root.end(), 0);
+  std::function<int(int)> find = [&](int x) { return root[x] == x ? x : root[x] = find(root[x]); };
+  for (const auto& [i, j, phi] : F.pairs) root[find(i)] = find(j);
+  std::map<int, std::vector<int>> family;
+  std::vector<int> fam_of(N);
+  for (Eigen::Index i = 0; i < N; ++i) family[fam_of[i] = find(i)].push_back(i);
+  std::vector<FinalRel> fin(F.pairs.size());
+  std::vector<Pair> pairs_out(F.pairs.size());
+#pragma omp parallel for num_threads(params.threads) schedule(dynamic)
+  for (size_t c = 0; c < F.pairs.size(); ++c) {
+    const auto& [i, j, phi] = F.pairs[c];
+    std::vector<int> out = family.at(fam_of[i]);
+    if ((Eigen::Index)out.size() > 100) out = {i, j};
+    Mat1D pa, pb;
+    iaf_pair(U, i, j, out, pa, pb);
+    double kk[3];
+    pair_ibd(i, j, pa, pb, kk, true);
+    fin[c].k0 = kk[0];
+    fin[c].k1 = kk[1];
+    fin[c].k2 = kk[2];
+    fin[c].kin = 0.25 * kk[1] + 0.5 * kk[2];
+    // the detection kinship, corrected for the genotype reliability
+    pairs_out[c] = Pair(i, j, phi / std::sqrt(rho(i) * rho(j)));
+  }
+  cao.print(tick.date(), "robust PCA (dwg, GL): final kinship and IBD sharing (k0, k1, k2) from the genotype likelihoods");
+  write_outputs(data, params, N, U, wv, pairs_out, [&](int i, int j) { return king(i, j); }, &fin);
+}
+
 void run_robust(Data* data, const Param& params) {
+  if (params.file_t == FileType::BEAGLE) {
+    if (params.robust != "dwg") cao.error("--robust with genotype likelihoods (-G) supports dwg only");
+    return run_dwg_gl(data, params);
+  }
   bool op = params.robust != "aarobust-kin" && params.robust != "diag-impute" &&
             (params.robust_engine == "operator" || params.robust_engine == "iram" ||
              (params.robust_engine == "auto" && data->nsamples > (uint)params.robust_dense_max));

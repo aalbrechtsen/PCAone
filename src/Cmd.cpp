@@ -263,7 +263,7 @@ Param::Param(int argc, char** argv) {
     }
 
     // handle EM-PCA
-    if (dopca && file_t == FileType::BEAGLE) pcangsd = true;
+    if (dopca && file_t == FileType::BEAGLE && robust.empty()) pcangsd = true;
     if (emu || pcangsd) {
       missme = true;
     } else if (dopca) {
@@ -274,8 +274,14 @@ Param::Param(int argc, char** argv) {
     if (!robust.empty()) {
       if (robust != "auto" && robust != "detect-white" && robust != "cswhite" && robust != "frkin" && robust != "aarobust-kin" && robust != "dwg")
         throw std::invalid_argument("--robust must be one of auto, aarobust-kin, detect-white, cswhite, frkin, dwg");
-      if (file_t != FileType::PLINK && file_t != FileType::PGEN)
-        throw std::invalid_argument("--robust supports --bfile/--pgen input only");
+      if (file_t != FileType::PLINK && file_t != FileType::PGEN && file_t != FileType::BEAGLE)
+        throw std::invalid_argument("--robust supports --bfile, --pgen and BEAGLE (-G) input");
+      if (file_t == FileType::BEAGLE) {
+        if (robust != "auto" && robust != "dwg")
+          throw std::invalid_argument("--robust with genotype likelihoods (-G) supports dwg (or auto) only");
+        if (out_of_core) throw std::invalid_argument("--robust with genotype likelihoods (-G) runs in-core only");
+        if (impute_diag) throw std::invalid_argument("--impute-diag does not support genotype likelihoods (-G)");
+      }
       if (emu || pcangsd || project > 0 || selection > 0 || inbreed > 0 || ld || evaladmix)
         throw std::invalid_argument("--robust can not be combined with --emu, --pcangsd, --project, --selection, --inbreed, -D or --evaladmix");
       if (robust_engine != "dense" && robust_engine != "operator" && robust_engine != "iram" && robust_engine != "auto")
