@@ -35,7 +35,7 @@ for k in (3, 10):
                 write_bed(pre, [["F", f"I{i}", "0", "0", "0", "-9"] for i in range(N)],
                           [Gb.BIM[i] for i in ds["cols"]], G.astype(np.int8))
                 ck = (B.king_robust(G) > B.KING_SCREEN) & ~np.eye(N, dtype=bool)
-                Upy, ppy, rpy = DL.dwg_loc_ea(G, k, ck, 4, kin_check=True, k0_max=0.7)
+                Upy, ppy, rpy = DL.dwg_loc_ea(G, k, ck, 4, kin_check=True, k0_max=0.8)
                 py = {(min(i, j), max(i, j)) for i, j, _ in ppy}
                 for tag, extra in [("in", ""), ("ooc", "-m 0.002")]:
                     out = f"{pre}_k{k}_{tag}"

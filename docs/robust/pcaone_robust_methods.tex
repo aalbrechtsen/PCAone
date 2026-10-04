@@ -254,9 +254,9 @@ nearest-neighbour search in a sketch (Section~\ref{sec:sketch}), which finds
 exactly the same related pairs. Its cost is $N^2s$ with $s=2048$, independent
 of the number of SNPs. The same sketch, with the structure axes projected
 out, gives the candidates of the evalAdmix screen (Section~\ref{sec:dwg}).
-At $N=100{,}000$, \texttt{dwg} takes 202\,s in-core (\texttt{detect-white}
-118\,s, standard PCAone 148\,s): the second neighbour search, for the screen,
-costs about 50\,s.
+At $N=100{,}000$, \texttt{dwg} takes 226\,s in-core (\texttt{detect-white}
+118\,s, standard PCAone 148\,s): the residual-sketch neighbour search of the
+screen costs about 50\,s, plus one refit when first cousins pass the screen.
 
 \section{The small-$N$ problem: the diagonal and the relatives}
 \label{sec:smalln}
@@ -709,7 +709,7 @@ rules.
     individuals of similar ancestry at small $N$ (two MXL individuals: 0.113,
     above true 2nd-degree pairs). A candidate found only by evalAdmix is kept
     only if it looks IBD-related: $k_0=$ observed / expected opposite
-    homozygotes $<0.7$, with individual allele frequencies from the structure
+    homozygotes $<0.8$, with individual allele frequencies from the structure
     axes (pair left out). Unrelated pairs have $k_0\approx1$ whatever their
     admixture; 2nd-degree relatives about 0.5.
 \end{enumerate}
@@ -1227,6 +1227,55 @@ axes) whose variance is more than half explained by family membership
     run.
 \end{itemize}
 
+
+\paragraph{Realistic LD and ancestry (HAPNEST).} Synthetic biobank genotypes
+with realistic LD (HAPNEST; chromosomes 12--22, LD-pruned to 68{,}044 SNPs; six
+ancestries, three of them admixed). $N=5000$ with 30\% in families built by
+transmission with recombination, including relatives of different ancestry;
+truth from a disjoint reference panel of 3600 (five ancestry axes).
+
+\begin{table}[htbp]
+\centering\small
+\fitbox{\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+ & min $R^2$ (5 axes) & relatives' error & family axes ($k=20$) & recall & grandparent across ancestries & false pairs & time \\
+\midrule
+standard PCA & 0.9987 & 0.048 & 15 of 15 & -- & -- & -- & 14\,s \\
+\texttt{detect-white} & 0.9977 & 0.028 & 0 & 97.3\% & 66\% & 0 & 100\,s \\
+\textbf{\texttt{dwg}} & \textbf{0.9988} & \textbf{0.019} & 0 & \textbf{98.3\%} & \textbf{87\%} & 0 & \textbf{21\,s} \\
+\bottomrule
+\end{tabular}}
+\caption{HAPNEST, $N=5000$ (1254 true pairs with pedigree kinship $\ge\tau$;
+16 threads). The dense and operator engines of \texttt{dwg} give identical
+pairs and PCs. All 22 pairs \texttt{dwg} misses have realised kinship below
+$\tau$ (PC-adjusted 0.057--0.087): recombination makes realised relatedness of
+2nd-degree pairs vary, and these are not detectable by design. Final
+$(k_0,k_1,k_2)$: parent--offspring (0.00, 1.00, 0.00), full sibs (0.25, 0.50,
+0.26), 2nd degree (0.50, 0.50, 0.00), MZ (0, 0, 1).}
+\end{table}
+
+\paragraph{A second real panel (1000 Genomes with ASW).} CEU, CHB, YRI and the
+admixed ASW (366 individuals, 100k complete SNPs); relatives made from real
+genotypes with recombination, including ASW families and relatives of
+different ancestry; $n=5$--20 per population, 3 replicates, 10 scenarios.
+
+\begin{table}[htbp]
+\centering\small
+\fitbox{\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & failures ($n=5$ / 10 / 20) & recall ($n=5$ / 10 / 20) & grandparent across ancestries & relatives' error ($k=2$ / 10) \\
+\midrule
+standard PCA & 27\% / 10\% / 0 & -- & -- & 0.23 \\
+\texttt{aarobust-kin} & 0 / 0 / 0 & 84\% / 78\% / 80\% & 44\% & 0.045 / 0.045 \\
+\texttt{detect-white} & 0 / 0 / 0 & 83\% / 78\% / 78\% & 44\% & 0.03 / 0.07 \\
+\textbf{\texttt{dwg}} & 0 / 0 / 0 & \textbf{90\% / 95\% / 96\%} & \textbf{100\%} & 0.036 / 0.041 \\
+\bottomrule
+\end{tabular}}
+\caption{1000 Genomes panel. The pairs reported beyond the simulated pedigree
+are real relatives in the panel (e.g.\ NA20317/NA20318, kinship 0.25), found
+by every robust method.}
+\end{table}
+
 \paragraph{Very large $N$: finding the relatives} (simulated as above, 30\%
 in families, 20k SNPs; truth: \texttt{plink2} KING over all pairs).
 
@@ -1297,9 +1346,9 @@ genotype products 17--20\,s.}
     about 20\,min at $N=500{,}000$ and 1.5\,h at $N=10^6$ on 16 threads
     (extrapolated). The bit-packed genotypes ($3NM/8$ bytes) are kept in memory
     for the KING check.
-  \item \textbf{Linkage.} The very-large-$N$ tests used unlinked SNPs; recall
-    on data with recombination (relatives built from admixTjeck2) remains to
-    be checked at large $N$.
+  \item \textbf{Linkage.} Checked at $N=5000$ on HAPNEST (realistic LD,
+    relatives with recombination); the $N=100{,}000$ tests still use unlinked
+    SNPs.
   \item \textbf{Genotype likelihoods} are not supported (genotype calls only).
   \item \textbf{Final relatedness at small $N$}: 2nd-degree kinship about
     0.02 too high in the $N=47$ real-data set (Table~\ref{tab:finalrel}).

@@ -1436,10 +1436,10 @@ static void run_robust_operator(Data* data, const Param& params) {
 // become candidates and the rank is not raised. Candidates: KING-robust >
 // screen, then evalAdmix kinship from the structure axes (admixture-aware),
 // confirmed by a k0 moment check (IBD: observed / expected opposite
-// homozygotes < 0.7), iterated until the pairs are stable.
+// homozygotes < 0.8), iterated until the pairs are stable.
 static const double DWG_TAU3 = 0.04419417382415922;  // 2^-4.5
 static const double DWG_NEFF = 4.0;
-static const double DWG_K0_MAX = 0.7;  // 2nd degree about 0.5; first cousins 0.75 (below tau anyway)
+static const double DWG_K0_MAX = 0.8;  // 2nd degree about 0.5 (0.7 cross-ancestry with low realised kinship)
 
 // u: an eigenvector; R: residual without this axis; v: noise
 static bool dwg_family_axis(const Mat1D& u0, const Mat2D& R, const Mat1D& v, std::vector<int>& top) {
@@ -1979,7 +1979,10 @@ static void run_dwg_operator(Data* data, const Param& params) {
   const double t_fit = std::chrono::duration<double>(std::chrono::steady_clock::now() - tf0).count();
   const uint64 passes_fit = passes;
   const auto ts0 = std::chrono::steady_clock::now();
+  // key: pairs of the current fit; a refit that does not change them ends the
+  // screen (no second neighbour search for candidates that did not become pairs)
   std::set<std::pair<int, int>> key, used(cand.begin(), cand.end());
+  for (const auto& [i, j, phi] : F.pairs) key.emplace(i, j);
   int rounds = 0, n_ea = 0;
   for (; rounds < 5; ++rounds) {
     // evalAdmix candidates: nearest neighbours in the sketch with the structure
@@ -2182,7 +2185,8 @@ void run_robust(Data* data, const Param& params) {
     off.diagonal().setConstant(false);
     DwgFit F = dwg_fit(As, tau, cand, edge, k + 1);
     MatB used = cand;  // candidates of the current fit
-    std::set<std::pair<int, int>> key;
+    std::set<std::pair<int, int>> key;  // pairs of the current fit: stop when a refit does not change them
+    for (const auto& [i, j, phi] : F.pairs) key.emplace(i, j);
     int rounds = 0, n_ea = 0;
     for (; rounds < 5; ++rounds) {
       // evalAdmix candidates from the structure axes, confirmed by k0

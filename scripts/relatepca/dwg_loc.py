@@ -127,7 +127,7 @@ def k0_moment(G, axes, pairs):
 def dwg_loc_ea(G, k, ck, c, rounds=5, kin_check=False, k0_max=None):
     off = ~np.eye(len(G), dtype=bool)
     U, axes, pairs, r = dwg_loc(G, k, ck, c, kin_check)
-    key = None
+    key = {(min(i, j), max(i, j)) for i, j, _ in pairs}  # stop when a refit does not change the pairs
     for _ in range(rounds):
         ea = I.evaladmix_kin(G, axes, intercept=True)
         ce = (ea > B.KING_SCREEN) & off & ~ck
