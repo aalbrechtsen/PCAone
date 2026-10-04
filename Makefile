@@ -356,3 +356,4 @@ test_bed_permutation: ${program}
 	$(CXX) -std=c++17 -Wall -Wextra tests/test_bed_shuffle.cpp -o tests/test_bed_shuffle
 	./tests/test_bed_shuffle
 	python3 tests/test_bed_permutation.py
+	python3 tests/test_bed_logical_perm.py
