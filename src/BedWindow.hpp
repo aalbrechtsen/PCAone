@@ -86,10 +86,11 @@ class BedWindowReader {
       const auto now = std::chrono::steady_clock::now();
       if (pass_started_ && grow_ && k_ < kmax_ && nwindows() > 1) {
         const double pass = std::chrono::duration<double>(now - pass_start_).count();
-        const double waited = wait_seconds_ - wait_at_pass_start_;
+        const double waited = stall_seconds_ - stall_at_pass_start_;
         if (waited > 0.05 * pass) {
           finish();
-          cur_.id = next_.id = -1;
+          cur_ = Window();  // release the old windows before larger ones are read
+          next_ = Window();
           const uint64_t old = k_;
           k_ = std::min(kmax_, 2 * k_);
           set_windows();
@@ -100,10 +101,15 @@ class BedWindowReader {
       }
       pass_started_ = true;
       pass_start_ = now;
-      wait_at_pass_start_ = wait_seconds_;
+      stall_at_pass_start_ = stall_seconds_;
     }
     if (cur_.id != w) {
       auto t0 = std::chrono::steady_clock::now();
+      // a stall: waiting for a background read, or reading in the foreground
+      // although a previous window was in use (so it could have been read
+      // ahead). The first read, and the first after the windows changed, are
+      // unavoidable and do not count towards --perm-adapt.
+      const bool avoidable = cur_.id >= 0;
       if (pending_.valid() && pending_id_ == w) {
         pending_.get();
         std::swap(cur_, next_);
@@ -112,7 +118,9 @@ class BedWindowReader {
         load(w, cur_);
       }
       pending_id_ = -1;
-      wait_seconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      wait_seconds_ += dt;
+      if (avoidable) stall_seconds_ += dt;
     }
     // read the next window (the first again after the last, for the next pass)
     const long nw = (long)nwindows();
@@ -196,7 +204,7 @@ class BedWindowReader {
   std::function<void(const std::string&)> log_;
   bool pass_started_ = false;
   std::chrono::steady_clock::time_point pass_start_;
-  double wait_at_pass_start_ = 0;
+  double stall_seconds_ = 0, stall_at_pass_start_ = 0;
   Window cur_, next_;
   std::future<void> pending_;
   long pending_id_ = -1;
