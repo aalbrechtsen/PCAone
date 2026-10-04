@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -42,13 +43,21 @@ class BedWindowReader {
   }
 
   ~BedWindowReader() {
-    if (pending_.valid()) {
-      try {
-        pending_.get();
-      } catch (...) {
-      }
-    }
+    finish();
     if (fd_ >= 0) ::close(fd_);
+  }
+
+  // Stop and wait for a background read; e.g. the read of the first window
+  // started after the last block of the last pass.
+  void finish() {
+    if (!pending_.valid()) return;
+    stop_ = true;
+    try {
+      pending_.get();
+    } catch (...) {
+    }
+    stop_ = false;
+    pending_id_ = -1;
   }
 
   BedWindowReader(const BedWindowReader&) = delete;
@@ -115,6 +124,7 @@ class BedWindowReader {
     bool failed = false;
 #pragma omp parallel for schedule(dynamic, 1) num_threads(nio_)
     for (int64_t r = 0; r < (int64_t)ranges.size(); ++r) {
+      if (stop_) continue;
       const uint64_t off = 3 + ranges[r].snp * width_, len = ranges[r].len * width_;
       unsigned char* d = win.data.data() + ranges[r].pos * width_;
       uint64_t done = 0;
@@ -129,6 +139,10 @@ class BedWindowReader {
       }
     }
     if (failed) throw std::runtime_error("Short read from the BED file");
+    if (stop_) {
+      win.id = -1;
+      return;
+    }
     win.id = w;
     bytes_read_ += n * width_;
   }
@@ -141,7 +155,8 @@ class BedWindowReader {
   Window cur_, next_;
   std::future<void> pending_;
   long pending_id_ = -1;
-  uint64_t bytes_read_ = 0;  // updated by the loading thread only while nobody reads it
+  std::atomic<bool> stop_{false};
+  uint64_t bytes_read_ = 0;  // updated by the loading thread; read it after finish()
   double wait_seconds_ = 0;
 };
 

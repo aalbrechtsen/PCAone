@@ -148,6 +148,8 @@ static int run(int argc, char* argv[]) {
   }
 
   const bool ooc_permutation = params.perm && params.out_of_core;
+  if (params.perm_mem > 0 && !(ooc_permutation && params.file_t == FileType::PLINK))
+    cao.warn("--perm-mem only applies to the out-of-core winSVD on PLINK input with shuffling; ignored");
 
   if (ooc_permutation) {
     tick.clock();

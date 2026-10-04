@@ -12,9 +12,11 @@
 using namespace std;
 
 FileBed::~FileBed() {
-  if (window_reader)
+  if (window_reader) {
+    window_reader->finish();
     cao.print(tick.date(), "logical BED permutation read", window_reader->bytes_read() / 1e9,
               "GB; waited for I/O", window_reader->wait_seconds(), "seconds");
+  }
 }
 
 void FileBed::read_records(uint64 start_idx, uint64 count) {
