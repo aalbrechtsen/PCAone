@@ -40,6 +40,9 @@ Rplots.pdf
 !/scripts/MergePgen.cpp
 !/scripts/benchmark/
 !/scripts/benchmark/*
+!/scripts/relatepca/
+!/scripts/relatepca/*.py
+/scripts/relatepca/__pycache__/
 /dataset
 /results
 /inbreeding
