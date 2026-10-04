@@ -337,40 +337,34 @@ void FileBed::apply_permutation(Param& config) {
 }
 
 void FileBed::apply_logical_permutation(const Param& config) {
-  const uint64 W = config.bands, bf = bandFactor, M = nsnps, width = bed_bytes_per_snp;
+  const uint64 W = config.bands, M = nsnps, width = bed_bytes_per_snp;
   if (M > UINT32_MAX) cao.error("too many SNPs for the logical BED permutation");
-  if (M < W * bf) cao.error("--perm-mem needs at least -w x factor SNPs; use --perm-mem 0");
-  // band b = source SNPs b, b+W, b+2W, ... kept in source order
-  std::vector<uint32_t> order;
-  order.reserve(M);
-  std::vector<uint64_t> band_start(W + 1, 0);
-  for (uint64 b = 0; b < W; ++b) {
-    band_start[b] = order.size();
-    for (uint64 j = b; j < M; j += W) order.push_back((uint32_t)j);
+  // winSVD updates Omg after every bandFactor blocks, i.e. at multiples of
+  // bucket SNPs. Deal the SNPs round-robin over the -w bands (SNP j to band
+  // j mod W, skipping a band once it holds its bucket; only the last one is
+  // short), so band b is exactly the logical SNPs [b * bucket, (b + 1) * bucket)
+  // and the blocks keep their uniform size.
+  const uint64 bucket = (uint64)blocksize * bandFactor;
+  std::vector<uint64_t> band_start(W + 1);
+  std::vector<uint64> capacity(W);
+  for (uint64 b = 0; b <= W; ++b) band_start[b] = std::min(M, b * bucket);
+  for (uint64 b = 0; b < W; ++b) capacity[b] = band_start[b + 1] - band_start[b];
+  if (band_start[W] != M) cao.error("BUG: -w bands do not cover the SNPs");
+  std::vector<uint64> fill(W, 0);
+  std::vector<uint32_t> order(M);
+  for (uint64 j = 0, b = 0; j < M; ++j, b = (b + 1) % W) {
+    while (fill[b] == capacity[b]) b = (b + 1) % W;
+    order[band_start[b] + fill[b]++] = (uint32_t)j;
   }
-  band_start[W] = M;
-  // each band is bandFactor blocks, so the Omg updates of winSVD (after every
-  // bandFactor blocks) see exactly one interleave set
-  start.clear();
-  stop.clear();
-  for (uint64 b = 0; b < W; ++b) {
-    const uint64 s = band_start[b], len = band_start[b + 1] - s;
-    for (uint64 t = 0; t < bf; ++t) {
-      const uint64 a = s + len * t / bf, e = s + len * (t + 1) / bf;
-      if (e <= a || e - a > blocksize) cao.error("BUG: cannot align blocks to the interleaved bands");
-      start.push_back((uint)a);
-      stop.push_back((uint)(e - 1));
-    }
-  }
-  nblocks = start.size();
 
   // windows of whole bands within the budget; two are held while the next one loads
-  const uint64 budget = (uint64)config.perm_mem * 1073741824ULL;
+  const uint64 budget = (uint64)(config.perm_mem * 1073741824.0);
   const uint64 band_bytes = (M + W - 1) / W * width;
   uint64 k = W;
   if (M * width > budget) k = std::max<uint64>(1, std::min<uint64>(W, budget / 2 / band_bytes));
   std::vector<uint64_t> starts;
-  for (uint64 b = 0; b < W; b += k) starts.push_back(band_start[b]);
+  for (uint64 b = 0; b < W; b += k)
+    if (band_start[b] < M) starts.push_back(band_start[b]);  // trailing bands can be empty
   starts.push_back(M);
   const int io_threads = 32;  // concurrent preads; mostly waiting on the disk
   window_reader = std::make_unique<PCAone::BedWindowReader>(config.filein + ".bed", width, order, starts, io_threads);

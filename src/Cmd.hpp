@@ -52,7 +52,7 @@ class Param {
   uint oversamples = 10;
   double tol = 1e-5;
   uint buffer = 2;
-  uint perm_mem = 0;  // GiB; > 0 reads the out-of-core BED permutation logically
+  double perm_mem = 0;  // GiB; > 0 reads the out-of-core BED permutation logically
   uint rand = 1;
   // for ld stuff
   bool print_r2 = false;
