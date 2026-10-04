@@ -7,6 +7,7 @@
 #include "Data.hpp"
 
 #include "Cmd.hpp"
+#include "Kinship.hpp"
 #include "Utils.hpp"
 
 using namespace std;
@@ -174,6 +175,11 @@ void Data::save_snps_in_mbim() {
   VT = (U'/s) * G = T * G
   V = G' * (U/s) // calculate V is not a good idea
  **/
+void Data::whiten_G() {
+  if (whitener) whitener->whiten(G);
+  if (row_transform) row_transform(G);
+}
+
 void Data::calcu_vt_initial(const Mat2D& T, Mat2D& VT, bool standardize) {
   if (nblocks == 1) {
     cao.error("only one block exists. please use in-memory mode instead");
@@ -184,6 +190,7 @@ void Data::calcu_vt_initial(const Mat2D& T, Mat2D& VT, bool standardize) {
     actual_block_size = stop[i] - start[i] + 1;
     // G (nsamples, actual_block_size)
     read_block_initial(start[i], stop[i], standardize);
+    whiten_G();
     VT.block(0, start[i], T.rows(), actual_block_size) = T * G.leftCols(actual_block_size);
   }
 
@@ -200,6 +207,7 @@ void Data::calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, M
     actual_block_size = stop[i] - start[i] + 1;
     // G (nsamples, actual_block_size)
     read_block_update(start[i], stop[i], U, svals, VT, standardize);
+    whiten_G();
     VT.block(0, start[i], T.rows(), actual_block_size) = T * G.leftCols(actual_block_size);
   }
 
@@ -213,12 +221,21 @@ void Data::write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, cons
   std::ofstream oute(params.fileout + ".eigvals");
   std::ofstream outu(params.fileout + ".eigvecs");
   Eigen::IOFormat fmt(6, Eigen::DontAlignCols, "\t", "\n");
+  if (whitener) {
+    // ancestry scores are Sigma^{1/2} U~, i.e. the unwhitened genotypes
+    // projected onto the loadings of the whitened data
+    Mat2D Uw = U;
+    whitener->unwhiten(Uw);
+    if (outu.is_open()) outu << Uw.format(fmt) << '\n';
+    cao.print(tick.date(), "kinship-whitened PCA: scores mapped back by Sigma^{1/2}");
+  } else if (outu.is_open()) {
+    outu << U.format(fmt) << '\n';
+  }
   if (outs.is_open()) {
     outs << '#' << U.rows() << ',' << V.rows() << '\n';
     outs << S.format(fmt) << '\n';
   }
   if (oute.is_open()) oute << E.format(fmt) << '\n';
-  if (outu.is_open()) outu << U.format(fmt) << '\n';
   if (params.printv) {
     save_snps_in_mbim();
     std::ofstream outv(params.fileout + ".loadings");

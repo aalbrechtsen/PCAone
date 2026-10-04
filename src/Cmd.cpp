@@ -107,6 +107,33 @@ Param::Param(int argc, char** argv) {
                                       "1: compute per-site inbreeding coefficient and HWE test.\n", inbreed, &inbreed);
   opts.add<Switch>("", "evaladmix", "compute the correlation of residuals (evalAdmix) given the top PCs.", &evaladmix);
   opts.add<Value<int>>("", "evaladmix-k", "number of PCs used by --evaladmix. default is all computed PCs (use K-1 for an admixture model with K populations).", evaladmix_k, &evaladmix_k);
+  opts.add<Value<std::string>>("", "kinship", "kinship of close relatives for a PCA not driven by families (kinship-whitened PCA).\n"
+                                              "either a pair table with columns ID1 ID2 KINSHIP (e.g. KING/PLINK2 .kin0, pcaone-ibd .ibd)\n"
+                                              "or an N x N matrix (e.g. the .kinship of --evaladmix).", "", &filekin);
+  opts.add<Value<double>>("", "kin-min", "pairs with kinship below this are treated as unrelated by --kinship (default 2^-3.5, i.e. 2nd degree).", kin_min, &kin_min);
+  auto robust_opt = opts.add<Implicit<std::string>>("", "robust", "PCA robust to close relatives (2nd degree and closer); --robust alone = auto. Modes are\n"
+                                             "auto: dwg; with --impute-diag aarobust-kin;\n"
+                                             "aarobust-kin: robust PCA of the GRM, diagonal unobserved, kinship threshold (does not depend on -k);\n"
+                                             "detect-white: detect related pairs on the Chen & Storey matrix (diagonal free), then whitening;\n"
+                                             "cswhite: CS whitening with KING (or --kinship) kinship; assumes HWE;\n"
+                                             "frkin: fixed rank + kinship threshold on the Chen & Storey matrix (diagonal free);\n"
+                                             "dwg: detect-white on the GRM scale, kinship from the fitted noise (no HWE), family axes and an admixture-aware evalAdmix + k0 screen.", "auto");
+  opts.add<Switch>("", "impute-diag", "PCA of the GRM with its diagonal imputed from the off-diagonal entries (small N: the observed\n"
+                                       "diagonal reflects heterozygosity, not structure). Alone: standard PCA with the diagonal imputed;\n"
+                                       "with --robust aarobust-kin: PCs of the fitted structure L instead of the GRM without the related pairs.", &impute_diag);
+  opts.add<Value<std::string>>("", "robust-engine", "--robust: dense (N x N in memory), operator (matrix-free block iteration, large N, needs --kinship candidates) or auto (dense up to --robust-dense-max samples).", robust_engine, &robust_engine);
+  opts.add<Switch>("", "robust-fixed-rank", "--robust detect-white: use rank k + 1 for the detection fit instead of choosing it from the noise edge (at most k + 1).", &robust_fixed_rank);
+  opts.add<Value<double>, Attribute::advanced>("", "robust-tol", "--robust-engine operator: convergence tolerance (relative residual of the structure eigenpairs and change of the fit).", robust_tol, &robust_tol);
+  opts.add<Value<int>, Attribute::advanced>("", "robust-small-max", "--robust auto --impute-diag: largest N that uses aarobust-kin.", robust_small_max, &robust_small_max);
+  opts.add<Value<std::string>, Attribute::advanced>("", "robust-pcs", "--robust-engine operator, detect-white and cswhite: compute the final PCs of the whitened genotypes with the operator iteration (operator) or the window-based RSVD of --svd 2 (winsvd).", robust_pcs, &robust_pcs);
+  opts.add<Switch, Attribute::advanced>("", "pcp-edge", "--robust aarobust-kin / --impute-diag: stop lowering the PCP threshold at the noise edge of the GRM, so the fit stays low rank.", &pcp_edge);
+  opts.add<Switch, Attribute::advanced>("", "pcp-iram", "--robust aarobust-kin / --impute-diag: compute only the eigenpairs above the PCP threshold with IRAM instead of full eigendecompositions.", &pcp_iram);
+  opts.add<Value<int>, Attribute::advanced>("", "robust-dense-max", "--robust-engine auto: largest N for the dense engine.", robust_dense_max, &robust_dense_max);
+  opts.add<Value<std::string>>("", "king-search", "--robust-engine operator without --kinship: how candidate pairs are found. all: KING-robust over all pairs; sketch: KING-robust for each individual's nearest neighbours in a genotype sketch (very large N); auto: sketch above --king-sketch-min samples.", king_search, &king_search);
+  opts.add<Value<int>, Attribute::advanced>("", "king-sketch-min", "--king-search auto: smallest N + 1 that uses the sketch.", king_sketch_min, &king_sketch_min);
+  opts.add<Value<int>, Attribute::advanced>("", "king-sketch-dim", "--king-search sketch: number of sketch columns.", king_sketch_dim, &king_sketch_dim);
+  opts.add<Value<int>, Attribute::advanced>("", "king-neighbours", "--king-search sketch: neighbours checked per individual (doubled while all of them are relatives).", king_neighbours, &king_neighbours);
+  opts.add<Value<double>>("", "king-screen", "--robust: only pairs with KING-robust kinship above this may be treated as related.", king_screen, &king_screen);
   opts.add<Value<int>>("", "selection", "compute selection statistics. Options are\n"
                                       "0: disabled;\n"
                                       "1: perform selection scan using Galinsky et al method;\n"
@@ -130,7 +157,17 @@ Param::Param(int argc, char** argv) {
   std::copy(argv, argv + argc, std::ostream_iterator<char *>(ss, " "));
   // clang-format on
   try {
-    opts.parse(argc, argv);
+    // --robust takes an optional mode: accept "--robust <mode>" as well as "--robust=<mode>"
+    std::vector<std::string> args(argv, argv + argc);
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+      if (args[i] == "--robust" && !args[i + 1].empty() && args[i + 1][0] != '-') {
+        args[i] += "=" + args[i + 1];
+        args.erase(args.begin() + i + 1);
+      }
+    std::vector<char*> argv2;
+    for (auto& a : args) argv2.push_back(a.data());
+    opts.parse((int)argv2.size(), argv2.data());
+    if (robust_opt->is_set()) robust = robust_opt->value();
     if (groff) {
       GroffOptionPrinter groff_printer(&opts);
       std::cout << groff_printer.print(Attribute::advanced);
@@ -234,6 +271,42 @@ Param::Param(int argc, char** argv) {
     }
     if (out_of_core && pcangsd && (file_t == FileType::BEAGLE))
       throw std::invalid_argument("not supporting -m option (out-of-core) for PCAngsd and BEAGLE input yet!");
+    if (!robust.empty()) {
+      if (robust != "auto" && robust != "detect-white" && robust != "cswhite" && robust != "frkin" && robust != "aarobust-kin" && robust != "dwg")
+        throw std::invalid_argument("--robust must be one of auto, aarobust-kin, detect-white, cswhite, frkin, dwg");
+      if (file_t != FileType::PLINK && file_t != FileType::PGEN)
+        throw std::invalid_argument("--robust supports --bfile/--pgen input only");
+      if (emu || pcangsd || project > 0 || selection > 0 || inbreed > 0 || ld || evaladmix)
+        throw std::invalid_argument("--robust can not be combined with --emu, --pcangsd, --project, --selection, --inbreed, -D or --evaladmix");
+      if (robust_engine != "dense" && robust_engine != "operator" && robust_engine != "iram" && robust_engine != "auto")
+        throw std::invalid_argument("--robust-engine must be dense, operator or auto");
+      if (k < 1) throw std::invalid_argument("--robust needs -k >= 1");
+      if (robust_pcs != "operator" && robust_pcs != "winsvd")
+        throw std::invalid_argument("--robust-pcs must be operator or winsvd");
+      if (king_search != "auto" && king_search != "all" && king_search != "sketch")
+        throw std::invalid_argument("--king-search must be all, sketch or auto");
+      if (king_sketch_dim < 64 || king_neighbours < 1)
+        throw std::invalid_argument("--king-sketch-dim must be >= 64 and --king-neighbours >= 1");
+      if (impute_diag && robust != "auto" && robust != "aarobust-kin")
+        throw std::invalid_argument("--impute-diag works with standard PCA and --robust aarobust-kin; the Chen & Storey "
+                                    "based modes correct the diagonal already");
+    }
+    if (impute_diag && robust.empty()) {
+      // standard PCA with the GRM diagonal imputed: run through the dense --robust path
+      if (file_t != FileType::PLINK && file_t != FileType::PGEN)
+        throw std::invalid_argument("--impute-diag supports --bfile/--pgen input only");
+      if (emu || pcangsd || project > 0 || selection > 0 || inbreed > 0 || ld || evaladmix || !filekin.empty())
+        throw std::invalid_argument("--impute-diag can not be combined with --emu, --pcangsd, --project, --selection, --inbreed, -D, --evaladmix or --kinship");
+      robust = "diag-impute";
+    }
+    if (!filekin.empty() && robust.empty()) {
+      if (!dopca || project > 0 || selection > 0 || inbreed > 0)
+        throw std::invalid_argument("--kinship only works for computing PCs");
+      if (emu || pcangsd || file_t == FileType::BEAGLE)
+        throw std::invalid_argument("--kinship does not support --emu, --pcangsd or BEAGLE input yet");
+      if (ld) throw std::invalid_argument("--kinship can not be used with -D/--ld");
+      if (!(kin_min > 0 && kin_min < 0.5)) throw std::invalid_argument("--kin-min has to be between (0, 0.5)");
+    }
     if (bands < 4 || bands % 2 != 0)
       throw std::invalid_argument("the -w/--batches must be a power of 2 and the minimun is 4.");
 

@@ -20,8 +20,10 @@
 #include "Halko.hpp"
 #include "InbredSamples.hpp"
 #include "InbredSites.hpp"
+#include "Kinship.hpp"
 #include "LD.hpp"
 #include "Projection.hpp"
+#include "Robust.hpp"
 #include "Selection.hpp"
 
 #ifdef WITH_OPENBLAS
@@ -44,6 +46,17 @@ static void setEnvironmentVariables(int threadCount) {
   setenv("MKL_NUM_THREADS", countStr.c_str(), 1);
   setenv("OMP_NUM_THREADS", countStr.c_str(), 1);
   setenv("OPENBLAS_NUM_THREADS", countStr.c_str(), 1);
+}
+
+// With few individuals per population the GRM diagonal reflects heterozygosity
+// rather than structure and can produce a spurious PC; --impute-diag fixes it.
+// PCAone does not know the populations, so k + 1 of them are assumed.
+static void warn_small_sample(const Param& params, uint N) {
+  const double per_pop = double(N) / (params.k + 1);
+  if (params.impute_diag || per_pop >= 20) return;
+  cao.warn("small sample: N =", N, " with -k", params.k, " is about", std::lround(per_pop),
+           " individuals per population (assuming k + 1 populations). The GRM diagonal then reflects heterozygosity "
+           "rather than structure and can create a spurious PC; consider --impute-diag");
 }
 
 int main(int argc, char* argv[]) {
@@ -118,6 +131,35 @@ int main(int argc, char* argv[]) {
     return bye();
   }
 
+  // PCA robust to close relatives: one pass over the raw genotypes, then N x N
+  if (!params.robust.empty()) {
+    params.center = false;  // raw {0, 0.5, 1}; the out-of-core reader is handled in run_robust
+    params.perm = false;
+    data = (params.file_t == FileType::PLINK) ? (Data*)new FileBed(params) : (Data*)new FilePgen(params);
+    data->prepare();
+    if (params.robust == "auto") {
+      // dwg (dense or operator engine); --impute-diag belongs to aarobust-kin
+      if (params.impute_diag) {
+        if (data->nsamples > (uint)params.robust_small_max)
+          cao.error("--impute-diag works with aarobust-kin, which --robust auto uses only up to --robust-small-max samples");
+        params.robust = "aarobust-kin";
+      } else {
+        params.robust = "dwg";
+      }
+      cao.print(tick.date(), "--robust auto: N =", data->nsamples, ", using", params.robust);
+    }
+    if (params.robust == "aarobust-kin") warn_small_sample(params, data->nsamples);
+    run_robust(data, params);
+    delete data;
+    if (params.file_t == FileType::PLINK)
+      make_plink2_eigenvec_file(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
+                                params.filein + ".fam");
+    else
+      make_plink2_eigenvec_from_psam(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
+                                     params.filein + ".psam");
+    return bye();
+  }
+
   const bool ooc_permutation = params.perm && params.out_of_core;
   if (params.perm && params.out_of_core && params.svd_t == SvdType::IRAM) {
     cao.warn("permutation is disabled for the Arnoldi/IRAM method");
@@ -167,10 +209,21 @@ int main(int argc, char* argv[]) {
 
   // be prepared for run
   data->prepare();
+  if ((params.file_t == FileType::PLINK || params.file_t == FileType::PGEN) && !params.emu && !params.pcangsd &&
+      params.project == 0 && params.selection == 0 && params.inbreed == 0 && !params.ld && !params.evaladmix &&
+      params.filekin.empty())
+    warn_small_sample(params, data->nsamples);
   if (ooc_permutation && params.file_t == FileType::PGEN) {
     data->perm = compute_pgen_perm(data->nsnps, params.bands, data->blocksize, max_threads, params.seed);
     cao.print(tick.date(), "initialized logical PGEN permutation. blocksize:", data->blocksize,
               ", batches:", params.bands, ", threads:", max_threads);
+  }
+
+  // kinship-whitened PCA: down-weight close relatives by Sigma^{-1/2}
+  KinshipWhitener* whitener = nullptr;
+  if (!params.filekin.empty()) {
+    whitener = new KinshipWhitener(params, data->nsamples);
+    if (!whitener->empty()) data->whitener = whitener;
   }
 
   // begin to run PCA
@@ -181,6 +234,7 @@ int main(int argc, char* argv[]) {
   } else if (params.svd_t == SvdType::FULL) {
     if (params.file_t == FileType::PLINK || params.file_t == FileType::BGEN || params.file_t == FileType::PGEN)
       data->standardize_E();
+    data->whiten_G();
     cao.print(tick.date(), "running exact PCA with in-core eigendecomposition (PLINK-like).");
     const Eigen::Index ncomp = std::min<Eigen::Index>(params.k, std::min<Eigen::Index>(data->G.rows(), data->G.cols()));
     Mat1D evals(ncomp), svals(ncomp);
@@ -223,6 +277,7 @@ int main(int argc, char* argv[]) {
   cao.print(tick.date(), "total elapsed reading time: ", data->readtime, " seconds");
 
   delete data;
+  delete whitener;
 
   // evalAdmix: correlation of residuals given the PCs just computed.
   // needs a second pass over the raw (uncentered, unstandardized) genotypes.

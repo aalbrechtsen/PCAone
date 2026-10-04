@@ -27,6 +27,7 @@ void ArnoldiOpData::perform_op(const double* x_in, double* y_out) const {
     data->read_block_initial(data->start[0], data->stop[0], standardize);
   }
   data->readtime += tick.reltime();
+  data->whiten_G();
 
   y.noalias() = data->G * (data->G.transpose() * x);
   for (uint k = 1; k < data->nblocks; ++k) {
@@ -37,6 +38,7 @@ void ArnoldiOpData::perform_op(const double* x_in, double* y_out) const {
       data->read_block_initial(data->start[k], data->stop[k], standardize);
     }
     data->readtime += tick.reltime();
+    data->whiten_G();
     // TODO: Kahan summation
     // optimal evaluation see
     // https://eigen.tuxfamily.org/dox/TopicWritingEfficientProductExpression.html
@@ -58,6 +60,7 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
     // SpMatrix sG = data->G.sparseView();
     PartialSVDSolver<Mat2D> svds(data->G, params.k, params.ncv);
     if (!(params.missme || params.ld)) data->standardize_E();
+    data->whiten_G();
     nconv = svds.compute(params.imaxiter, params.itol);
     if (nconv != params.k) cao.error("the nconv is not equal to k.");
     U = svds.matrix_U(params.k);

@@ -94,6 +94,25 @@ class Param {
   bool center = true;      // false if G is raw data likelihood or inbred mode
   bool evaladmix = false;  // compute correlation of residuals (evalAdmix)
   int evaladmix_k = 0;     // PCs used by --evaladmix; 0 means all available
+  // for kinship-whitened PCA
+  std::string filekin;            // kinship of close relatives, pairs or N x N matrix
+  double kin_min = 0.08838834765;  // 2^-3.5, KING lower bound of 2nd degree
+  // for --robust
+  std::string robust;         // auto, aarobust-kin, detect-white, cswhite, frkin (empty: off)
+  int robust_small_max = 1000;
+  bool robust_fixed_rank = false;
+  bool impute_diag = false;  // GRM diagonal imputed from the off-diagonal entries (standard PCA / aarobust-kin)
+  double robust_tol = 1e-6;  // operator engine: convergence tolerance of the subspace iterations
+  double king_screen = 0.04;  // only pairs with KING kinship above this may be treated as related
+  std::string king_search = "auto";  // operator engine candidates: all (KING over all pairs), sketch, or auto
+  int king_sketch_min = 20000;        // --king-search auto: sketch above this N
+  int king_sketch_dim = 2048;         // columns of the count sketch
+  int king_neighbours = 5;            // sketch neighbours checked per individual (extended for large families)
+  std::string robust_engine = "auto";  // dense, operator (alias iram) or auto (dense up to robust_dense_max samples)
+  int robust_dense_max = 5000;
+  bool pcp_iram = false;
+  bool pcp_edge = false;  // aarobust-kin: do not lower the PCP threshold below the GRM noise edge (L stays low rank)  // aarobust-kin: partial eigen-thresholding by IRAM (Spectra) instead of full eigendecompositions
+  std::string robust_pcs = "operator";  // operator engine, whitening modes: final PCs by the operator iteration or winSVD (--svd 2)
   // bool estpi = false; // true if output pi is needed
 
   std::ostringstream ss;

@@ -116,6 +116,7 @@ void NormalRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
           data->standardize_E();
         }
       }
+      data->whiten_G();
     }
     if (pi > 0) {
       Eigen::HouseholderQR<Eigen::Ref<Mat2D>> qr(H);
@@ -147,6 +148,7 @@ void NormalRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
       data->read_block_update(start_idx, stop_idx, U, S, V.transpose(), standardize);
     }
     data->readtime += tick.reltime();
+    data->whiten_G();
     G.middleRows(start_idx, actual_block_size).noalias() = data->G.transpose() * Omg;
     H.noalias() += data->G * G.middleRows(start_idx, actual_block_size);
   }
@@ -175,6 +177,7 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
           data->standardize_E();
         }
       }
+      data->whiten_G();
       bandsize = 1;
       // blocksize: how many snps in each block
       blocksize = (unsigned int)ceil((double)data->nsnps / data->params.bands);
@@ -240,6 +243,7 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
       data->read_block_update(start_idx, stop_idx, U, S, V.transpose(), standardize);
     }
     data->readtime += tick.reltime();
+    data->whiten_G();
     G.middleRows(start_idx, actual_block_size).noalias() = data->G.transpose() * Omg;
 
     if (i <= bandsize / 2) {

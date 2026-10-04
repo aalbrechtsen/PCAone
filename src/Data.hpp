@@ -1,10 +1,14 @@
 #ifndef PCAONE_DATA_
 #define PCAONE_DATA_
 
+#include <functional>
+
 #include "Cmd.hpp"
 #include "Common.hpp"
 
 const double VAR_TOL = 1e-9;
+
+class KinshipWhitener;
 
 class Data {
  public:
@@ -34,9 +38,13 @@ class Data {
   void calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, Mat2D& VT, bool standardize);
   // given PCs, predict the missing values, then update in place by block
   void predict_missing_E(const Mat2D& U, uint64 start_idx, uint64 stop_idx);
+  // --kinship: whiten the rows of G (the whole matrix in-core, or the block just read)
+  void whiten_G();
 
  public:
   const Param& params;
+  const KinshipWhitener* whitener = nullptr;  // set by --kinship, not owned
+  std::function<void(Mat2D&)> row_transform;  // set by --robust for its final PCA (in place, rows of G)
   double readtime = 0;
   bool snpmajor = true;
   bool nsamples_ge_nsnps = false;  // if nsamples greater than or equal to nsnps
