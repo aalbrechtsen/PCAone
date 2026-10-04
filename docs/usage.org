@@ -284,6 +284,22 @@ it does not change the order. SNP indices and the BIM lines take additional
 memory. The permuted BED/BIM/FAM (=<out>.perm.*=) are removed after the PCA
 unless =-v 3= is used, and =-o= may not point them at the input.
 
+=--perm-mem <GiB>= reads the BED in permuted order straight from the input
+instead, with no copy, no permutation step before the PCA and no extra disk
+space. Band b of the =-w= bands then holds every W-th SNP (b, b+W, b+2W, ...),
+an interleave rather than a random assignment. A window of k consecutive bands
+is read at once: their SNPs are neighbours in the BED, so the reads are
+contiguous pieces of k SNPs, issued concurrently in file order, and the next
+window is read in the background while the current one is used. The window
+size, and with it the read length, is set by =--perm-mem=: two windows are
+held at a time, or the whole BED once if it fits, in which case later passes
+read nothing. Larger windows mean fewer seeks; for large N a few GiB already
+give reads of several MB. The PCs are those of a copy permuted in the same
+order, for any =--perm-mem=. =-m= and =--perm-mem= add up.
+#+begin_src shell
+./PCAone --bfile example/plink -m 2 --perm-mem 8
+#+end_src
+
 *** Run sSVD method with out-of-core mode
 #+begin_src shell
 ./PCAone --bfile example/plink --svd 1 -m 2
