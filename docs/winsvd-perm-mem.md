@@ -147,10 +147,56 @@ that too, and is worth doing independently; what only the logical order
 gives is no permutation step, no second BED on disk, and with a large budget
 a single read of the BED for the whole run.
 
+## Less RAM, randomisation, adaptive windows (`--perm-chunk`, `--perm-rotate`, `--perm-adapt`)
+
+The contiguous read length is c × k SNPs: k bands per window (RAM) times c
+neighbouring SNPs dealt to a band at a time.
+
+* `--perm-chunk c` deals chunks of c neighbouring SNPs to the bands: the same
+  read length with c times less RAM. (c ≥ 16 hurts convergence, see above.)
+* `--perm-rotate` rotates the bands by a random offset (`--seed`) in every
+  stretch of W chunks. Bands stay exactly balanced; a window's piece of a
+  stretch splits at most once, so reads stay long.
+* `--perm-adapt` starts with windows of ~256 KiB reads and doubles them after
+  a pass that spent more than 5 % of its time stalled on I/O it could have
+  read ahead; `--perm-mem` becomes a cap rather than a target.
+
+**D1 (10k × 1M), cold, 4 GB cap; vs exact PCs**
+
+| run | window RAM | epochs | wall s | I/O wait s | subspace | worst PC \|cor\| |
+|---|---|---|---|---|---|---|
+| c = 1, `--perm-mem 1` | 0.95 GB | 8 | 209 | 4.5 | 0.99971 | 0.99949 |
+| c = 2, `--perm-mem 0.5` | 0.45 GB | 9 | 239 | 8.0 | 0.99980 | 0.99950 |
+| c = 4, `--perm-mem 0.25` | 0.21 GB | 9 | 222 | 11.5 | 0.99970 | 0.99933 |
+| c = 1 + rotate, seed 112 | 0.95 GB | 8 | 183 | 4.6 | 0.99977 | 0.99957 |
+| c = 1 + rotate, seed 7 | 0.95 GB | 8 | 203 | 4.7 | 0.99972 | 0.99947 |
+| c = 4 + rotate, `--perm-mem 0.25` | 0.21 GB | 10 | 237 | 8.7 | 0.99965 | 0.99931 |
+
+**D2 (100k × 500k), cold; vs upstream's run**
+
+| run | window RAM | max RSS | epochs | wall s | I/O wait s | subspace |
+|---|---|---|---|---|---|---|
+| c = 1, `--perm-mem 4` | 3.6 GB | 7.1 GB | 8 | 1116 | 18 | 0.99981 |
+| **c = 4, `--perm-mem 1`** | **0.73 GB** | **4.2 GB** | 8 | **1110** | 4 | 0.99978 |
+| c = 1 + rotate, `--perm-mem 4` | 3.6 GB | 7.1 GB | 9 | 1246 | 14 | 0.99971 |
+| `--perm-adapt`, cap 16 GB (stayed at 11 bands) | ≈ 4 GB | 7.5 GB | 8 | 1118 | 20 | 0.99982 |
+| c = 1, `--perm-mem 16` (whole BED) | 12.5 GB | 15.1 GB | 8 | 1136 | 60 | — |
+
+* Accuracy is the same for every option (the spread is that of random seeds).
+* **Chunks of 4 cut the window RAM 4–5× at the same speed on D2**; on D1 they
+  cost one extra epoch (+6 %). c = 2–4 is a good choice when RAM is tight.
+* Rotation is neutral: epochs moved by ±1 either way, as with random bands.
+* `--perm-adapt` keeps the window as small as the computation allows: with a
+  16 GB cap it used ~4 GB and ran as fast as reading the whole BED once.
+  (A first version counted the unavoidable first read of each pass as a stall
+  and doubled the window every pass; fixed.)
+
 ## Correctness
 
 * `tests/test_bed_logical_perm.py` (in `make test_bed_permutation`): for
-  windows from the whole BED down to one band, plain and with `--emu`, the
+  windows from the whole BED down to one band, plain and with `--emu`, and for
+  `--perm-chunk`, `--perm-rotate` (same `--seed` → same order) and
+  `--perm-adapt` (byte-identical PCs to fixed windows), the
   eigenvalues, eigenvectors and loadings equal those of a physically reordered
   copy in the same order run with `-S`; `.mbim` is in input order; no
   `.perm.*` is written; the input BED/BIM/FAM are byte-identical after a

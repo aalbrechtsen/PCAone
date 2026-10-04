@@ -42,7 +42,9 @@ so that sum no longer covers all the variance.
     disk space; if the BED fits in =--perm-mem= it is read once for the whole run. The PCs equal
     those of a copy in the same order for any window size. Off by default (=0=): the random-band
     copy is unchanged. The cleanup after the PCA removes PLINK files only if they are the
-    =<out>.perm= copy.
+    =<out>.perm= copy. =--perm-chunk=, =--perm-rotate= and =--perm-adapt= trade RAM for read
+    length, randomise the band assignment, and size the windows to the disk; =-v 3= writes the
+    order to =<out>.perm.idx=.
 
 - v0.8.0
   - =--inbreed 2= estimates the inbreeding coefficient of each sample, accounting for population

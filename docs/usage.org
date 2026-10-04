@@ -296,6 +296,13 @@ held at a time, or the whole BED once if it fits, in which case later passes
 read nothing. Larger windows mean fewer seeks; for large N a few GiB already
 give reads of several MB. The PCs are those of a copy permuted in the same
 order, for any =--perm-mem=. =-m= and =--perm-mem= add up.
+
+Three options refine it. =--perm-chunk c= deals chunks of c neighbouring SNPs
+to the bands, so the reads are c times longer for the same RAM (c = 2-4 is
+safe; long chunks slow the convergence). =--perm-rotate= rotates the bands at
+random (=--seed=) in every stretch of W chunks, keeping them balanced.
+=--perm-adapt= starts with small windows (reads of about 256 KiB) and doubles
+them while the PCA waits for the disk, with =--perm-mem= as the cap.
 #+begin_src shell
 ./PCAone --bfile example/plink -m 2 --perm-mem 8
 #+end_src
