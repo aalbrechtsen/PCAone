@@ -160,7 +160,8 @@ void Data::save_snps_in_mbim() {
     return false;
   };
   const bool metadata_is_permuted =
-      params.file_t == FileType::PLINK && params.perm && params.out_of_core && perm.indices().size() == nsnps;
+      params.file_t == FileType::PLINK && params.perm && params.out_of_core && perm.indices().size() == nsnps &&
+      !logical_bed_perm;
   const bool frequency_is_permuted = params.perm && params.out_of_core && perm.indices().size() == nsnps;
 
   if (!params.filterSNP && !params.perm) {

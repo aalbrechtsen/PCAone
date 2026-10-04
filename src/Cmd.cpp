@@ -102,6 +102,7 @@ Param::Param(int argc, char** argv) {
   opts.add<Unsigned, Attribute::advanced>("", "N", "the number of samples if already known.", 0, &nsamples);
   opts.add<Value<double>, Attribute::advanced>("", "scale-factor", "feature counts for each sample are normalized and multiplied by this value", 1.0, &scaleFactor);
   opts.add<Unsigned, Attribute::advanced>("", "buffer", "genotype buffer in GiB for permuting data (indices/metadata extra).", buffer, &buffer);
+  opts.add<Unsigned, Attribute::advanced>("", "perm-mem", "GiB for reading an out-of-core BED in interleaved -w bands without writing a permuted copy. 0 writes <out>.perm.bed.", perm_mem, &perm_mem);
   opts.add<Unsigned, Attribute::advanced>("", "imaxiter", "maximum number of IRAM iterations.", imaxiter, &imaxiter);
   opts.add<Value<double>, Attribute::advanced>("", "itol", "stopping tolerance for IRAM algorithm.", itol, &itol);
   auto ncv_opt = opts.add<Unsigned, Attribute::advanced>("", "ncv", "the number of Lanzcos basis vectors for IRAM.", ncv, &ncv);
