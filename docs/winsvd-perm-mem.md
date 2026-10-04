@@ -49,19 +49,25 @@ Interleaving is not less accurate. On D1, against the exact PCs (`--svd 3`):
 
 What *does* matter is that every band gets an even share of every local
 region. We first tried "approximately permuted" orders, runs of c consecutive
-SNPs dealt to bands (which would give long reads without any RAM). Against
-the old interleave on D1:
+SNPs dealt to bands (which would give long reads without any RAM). On D1,
+against the exact PCs (eigenvalues 243, 232 for the populations; 14.1, 11.9,
+10.5 for the three inversions; 2.61–2.44, nearly equal, for PCs 6–10):
 
-| run length c | epochs | worst PC \|cor\| | subspace |
-|---|---|---|---|
-| 1 (interleave) | 7 | 1 | 1 |
-| 4 | 7 | 0.998 | 0.9989 |
-| 16 | 12 | 0.53 | 0.989 |
-| 64, 256, 1024, none | 21 (maxp, no convergence) | 0.44–0.80 | 0.91–0.95 |
+| run length c | epochs | PC1–5 \|cor\| | worst of PC6–10 | subspace (10 PCs) |
+|---|---|---|---|---|
+| 1 (old interleave, earlier code) | 7 | 1.0000 | 0.9992 | 0.99959 |
+| 4 | 7 | 1.0000 | 0.9985 | 0.99928 |
+| 16 | 12 | 1.0000 | 0.54 | 0.9898 |
+| 64 | 21 (maxp, no convergence) | 1.0000 | 0.44 | 0.9310 |
+| no permutation | 21 (maxp, no convergence) | 1.0000 | 0.57 | 0.9220 |
 
-A 3000-SNP inversion split into runs of 16 gives bands 32 or 48 of its SNPs
-(±20 %), and the window updates disagree. So the reads must come from the
-exact interleave; the window is what makes them long.
+The structure PCs are found in every case, even without a permutation. What
+long runs cost is convergence: more epochs (each a full pass over the BED),
+or none within `--maxp`, and poorly determined PCs near the noise level. With
+runs of c SNPs a local region is shared out in multiples of c (an LD-heavy
+3000-SNP region at c = 16: 32 or 48 SNPs per band), so the bands disagree more
+and the window updates settle slowly. So the reads must come from the exact
+interleave; the window is what makes them long.
 
 ## Where the time goes
 
