@@ -53,6 +53,9 @@ class Param {
   double tol = 1e-5;
   uint buffer = 2;
   double perm_mem = 0;  // GiB; > 0 reads the out-of-core BED permutation logically
+  uint perm_chunk = 1;     // --perm-mem: SNPs dealt to a band at a time
+  bool perm_rotate = false;  // --perm-mem: random band rotation per stretch of W chunks
+  bool perm_adapt = false;   // --perm-mem: start with small windows, grow while waiting for I/O
   uint rand = 1;
   // for ld stuff
   bool print_r2 = false;

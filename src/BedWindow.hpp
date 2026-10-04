@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <stdexcept>
 #include <string>
@@ -33,14 +34,23 @@ namespace PCAone {
 // trades RAM for read length.
 class BedWindowReader {
  public:
-  BedWindowReader(const std::string& bed, uint64_t width, std::vector<uint32_t> order, std::vector<uint64_t> starts,
-                  int io_threads)
-      : width_(width), order_(std::move(order)), starts_(std::move(starts)), nio_(std::max(1, io_threads)) {
-    if (starts_.size() < 2 || starts_.front() != 0 || starts_.back() != order_.size())
-      throw std::invalid_argument("BedWindowReader: windows must cover the logical SNPs");
+  // bands[b] is the first logical SNP of band b (bands.back() = number of SNPs).
+  // A window is k consecutive bands. With grow, k doubles (up to kmax) after a
+  // pass in which the caller waited for I/O more than 5 % of the pass.
+  BedWindowReader(const std::string& bed, uint64_t width, std::vector<uint32_t> order, std::vector<uint64_t> bands,
+                  uint64_t k, uint64_t kmax, bool grow, int io_threads,
+                  std::function<void(const std::string&)> log = nullptr)
+      : width_(width), order_(std::move(order)), bands_(std::move(bands)), k_(std::max<uint64_t>(1, k)),
+        kmax_(std::max<uint64_t>(k_, kmax)), grow_(grow), nio_(std::max(1, io_threads)), log_(std::move(log)) {
+    if (bands_.size() < 2 || bands_.front() != 0 || bands_.back() != order_.size())
+      throw std::invalid_argument("BedWindowReader: bands must cover the logical SNPs");
+    set_windows();
     fd_ = ::open(bed.c_str(), O_RDONLY);
     if (fd_ < 0) throw std::runtime_error("Cannot open " + bed);
   }
+
+  uint64_t bands_per_window() const { return k_; }
+  uint64_t max_bands_per_window() const { return kmax_seen_; }
 
   ~BedWindowReader() {
     finish();
@@ -72,6 +82,26 @@ class BedWindowReader {
   void copy(uint64_t first, uint64_t count, unsigned char* dst) {
     const long w = (long)(std::upper_bound(starts_.begin(), starts_.end(), first) - starts_.begin()) - 1;
     if (w < 0 || first + count > starts_[w + 1]) throw std::logic_error("BedWindowReader: block crosses a window");
+    if (w == 0 && cur_.id != 0) {  // a new pass begins
+      const auto now = std::chrono::steady_clock::now();
+      if (pass_started_ && grow_ && k_ < kmax_ && nwindows() > 1) {
+        const double pass = std::chrono::duration<double>(now - pass_start_).count();
+        const double waited = wait_seconds_ - wait_at_pass_start_;
+        if (waited > 0.05 * pass) {
+          finish();
+          cur_.id = next_.id = -1;
+          const uint64_t old = k_;
+          k_ = std::min(kmax_, 2 * k_);
+          set_windows();
+          if (log_)
+            log_("waited " + std::to_string(waited) + " s for I/O in a " + std::to_string(pass) +
+                 " s pass; window " + std::to_string(old) + " -> " + std::to_string(k_) + " bands");
+        }
+      }
+      pass_started_ = true;
+      pass_start_ = now;
+      wait_at_pass_start_ = wait_seconds_;
+    }
     if (cur_.id != w) {
       auto t0 = std::chrono::steady_clock::now();
       if (pending_.valid() && pending_id_ == w) {
@@ -97,6 +127,15 @@ class BedWindowReader {
   }
 
  private:
+  void set_windows() {
+    starts_.clear();
+    const uint64_t nb = bands_.size() - 1;
+    for (uint64_t b = 0; b < nb; b += k_)
+      if (bands_[b] < bands_.back() && (starts_.empty() || bands_[b] > starts_.back())) starts_.push_back(bands_[b]);
+    starts_.push_back(bands_.back());
+    kmax_seen_ = std::max(kmax_seen_, k_);
+  }
+
   struct Window {
     long id = -1;
     std::vector<unsigned char> data;  // records in file order
@@ -150,8 +189,14 @@ class BedWindowReader {
   int fd_ = -1;
   uint64_t width_;
   std::vector<uint32_t> order_;
-  std::vector<uint64_t> starts_;
+  std::vector<uint64_t> bands_, starts_;
+  uint64_t k_, kmax_, kmax_seen_ = 0;
+  bool grow_;
   int nio_;
+  std::function<void(const std::string&)> log_;
+  bool pass_started_ = false;
+  std::chrono::steady_clock::time_point pass_start_;
+  double wait_at_pass_start_ = 0;
   Window cur_, next_;
   std::future<void> pending_;
   long pending_id_ = -1;

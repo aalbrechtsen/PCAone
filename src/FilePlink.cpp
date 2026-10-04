@@ -15,7 +15,8 @@ FileBed::~FileBed() {
   if (window_reader) {
     window_reader->finish();
     cao.print(tick.date(), "logical BED permutation read", window_reader->bytes_read() / 1e9,
-              "GB; waited for I/O", window_reader->wait_seconds(), "seconds");
+              "GB; waited for I/O", window_reader->wait_seconds(), "seconds; largest window",
+              window_reader->max_bands_per_window(), "bands");
   }
 }
 
@@ -340,42 +341,57 @@ void FileBed::apply_logical_permutation(const Param& config) {
   const uint64 W = config.bands, M = nsnps, width = bed_bytes_per_snp;
   if (M > UINT32_MAX) cao.error("too many SNPs for the logical BED permutation");
   // winSVD updates Omg after every bandFactor blocks, i.e. at multiples of
-  // bucket SNPs. Deal the SNPs round-robin over the -w bands (SNP j to band
-  // j mod W, skipping a band once it holds its bucket; only the last one is
-  // short), so band b is exactly the logical SNPs [b * bucket, (b + 1) * bucket)
-  // and the blocks keep their uniform size.
+  // bucket SNPs. Band b is the logical SNPs [b * bucket, (b + 1) * bucket)
+  // (only the last band is short), so the blocks keep their uniform size.
   const uint64 bucket = (uint64)blocksize * bandFactor;
   std::vector<uint64_t> band_start(W + 1);
   std::vector<uint64> capacity(W);
   for (uint64 b = 0; b <= W; ++b) band_start[b] = std::min(M, b * bucket);
   for (uint64 b = 0; b < W; ++b) capacity[b] = band_start[b + 1] - band_start[b];
   if (band_start[W] != M) cao.error("BUG: -w bands do not cover the SNPs");
+  // Chunks of c source SNPs are dealt to the bands in turn; chunk t of stretch i
+  // (W chunks) goes to band (t + r_i) mod W, r_i = 0 or random with
+  // --perm-rotate. A full band passes its share on to the next one.
+  const uint64 c = std::max<uint>(1, config.perm_chunk);
+  PortableRng rng(config.seed);
   std::vector<uint64> fill(W, 0);
   std::vector<uint32_t> order(M);
-  for (uint64 j = 0, b = 0; j < M; ++j, b = (b + 1) % W) {
-    while (fill[b] == capacity[b]) b = (b + 1) % W;
-    order[band_start[b] + fill[b]++] = (uint32_t)j;
+  for (uint64 j = 0, t = 0, r = 0; j < M; ++t) {
+    if (t % W == 0) r = config.perm_rotate ? rng.below(W) : 0;
+    uint64 b = (t % W + r) % W, n = std::min<uint64>(c, M - j);
+    while (n) {
+      while (fill[b] == capacity[b]) b = (b + 1) % W;
+      const uint64 take = std::min<uint64>(n, capacity[b] - fill[b]);
+      for (uint64 i = 0; i < take; ++i) order[band_start[b] + fill[b]++] = (uint32_t)j++;
+      n -= take;
+    }
   }
 
-  // windows of whole bands within the budget; two are held while the next one loads
+  // windows of k bands; two are held while the next one loads, or the whole BED
   const uint64 budget = (uint64)(config.perm_mem * 1073741824.0);
   const uint64 band_bytes = (M + W - 1) / W * width;
-  uint64 k = W;
-  if (M * width > budget) k = std::max<uint64>(1, std::min<uint64>(W, budget / 2 / band_bytes));
-  std::vector<uint64_t> starts;
-  for (uint64 b = 0; b < W; b += k)
-    if (band_start[b] < M) starts.push_back(band_start[b]);  // trailing bands can be empty
-  starts.push_back(M);
+  uint64 kmax = W;
+  if (M * width > budget) kmax = std::max<uint64>(1, std::min<uint64>(W, budget / 2 / band_bytes));
+  // --perm-adapt: the smallest k whose contiguous reads (k chunks) reach 256 KiB
+  uint64 k = kmax;
+  if (config.perm_adapt) k = std::min<uint64>(kmax, std::max<uint64>(1, (262144 + c * width - 1) / (c * width)));
   const int io_threads = 32;  // concurrent preads; mostly waiting on the disk
-  window_reader = std::make_unique<PCAone::BedWindowReader>(config.filein + ".bed", width, order, starts, io_threads);
+  window_reader = std::make_unique<PCAone::BedWindowReader>(
+      config.filein + ".bed", width, order, band_start, k, kmax, config.perm_adapt, io_threads,
+      [](const std::string& msg) { cao.print(tick.date(), "--perm-adapt:", msg); });
+  if (config.verbose >= 3) {  // the logical order, for checking
+    std::ofstream idx(config.fileout + ".perm.idx");
+    for (uint64 d = 0; d < M; ++d) idx << order[d] << "\n";
+  }
 
   Eigen::VectorXi indices(M);
   for (uint64 d = 0; d < M; ++d) indices(d) = (int)order[d];
   perm = PermMat(indices);
   logical_bed_perm = true;
-  cao.print(tick.date(), "interleaved -w bands read logically from the input BED (no .perm.bed); window =", k,
-            "of", W, "bands,", (double)(starts.size() > 2 ? 2 : 1) * band_bytes * k / 1073741824.0,
-            "GiB, contiguous reads of", k, "SNPs (", k * width / 1024.0, "KiB )");
+  cao.print(tick.date(), "interleaved -w bands read logically from the input BED (no .perm.bed); chunk =", c,
+            "SNPs, rotate =", config.perm_rotate, ", window =", k, "of", W, "bands (max", kmax, "),",
+            (double)(kmax < W ? 2 : 1) * band_bytes * kmax / 1073741824.0, "GiB at most, contiguous reads of",
+            k * c, "SNPs (", k * c * width / 1024.0, "KiB )");
 }
 
 namespace {
