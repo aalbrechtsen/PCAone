@@ -20,7 +20,7 @@
 \setbeamerfont{frametitle}{size=\Large,series=\bfseries}
 \setbeamertemplate{footline}{\hfill{\color{muted}\scriptsize\insertframenumber}\hspace{8pt}\vspace{5pt}}
 \newcommand{\opt}[1]{\texttt{-{}-#1}}
-\newcommand{\take}[1]{\vfill\begin{center}{\color{accent}\large\bfseries #1}\end{center}\vspace{2pt}}
+\newcommand{\take}[1]{\par\vfill{\centering{\color{accent}\large\bfseries #1}\par}\vspace{-12pt}}
 \newcommand{\aside}[1]{{\scriptsize\color{muted}#1}}
 % a section-title slide
 \newcommand{\sect}[1]{\begin{frame}\vfill\centering{\color{accent}\huge\bfseries #1}\vfill\end{frame}}
@@ -36,8 +36,8 @@
 \begin{frame}
 \centering
 \includegraphics[width=\linewidth]{truth.pdf}
-\take{Four populations --- this is what PCA should find.}
 \aside{The truth: a PCA of 326 other admixTjeck2 individuals, with these 40 projected onto it.}
+\take{Four populations --- this is what PCA should find.}
 \end{frame}
 
 \begin{frame}
@@ -78,94 +78,16 @@
 \begin{frame}{What the top two PCs leave unexplained}
 \centering
 \includegraphics[width=\linewidth]{pca_resid.pdf}
-\take{YRI heterozygosity is the largest thing left --- so PC3 models it.}
 \aside{5 per population, no relatives. 84\% of what is left sits on the diagonal; PC3 puts 99\% of its weight on YRI.}
+\take{YRI heterozygosity is the largest thing left --- so PC3 models it.}
 \end{frame}
 
 \begin{frame}{\ldots and with relatives}
 \centering
 \includegraphics[width=\linewidth]{pca_resid_rel.pdf}
-\take{Off the diagonal, relatives dominate --- so PC3 models them.}
 \aside{10 per population + 8 relatives. Related pairs: 0.33 on average vs.\ a spread of 0.04 for all other pairs;
 PC3 puts 77\% of its weight on the 11 individuals in related pairs.}
-\end{frame}
-
-% ============================================================== why
-\sect{Why relatives break PCA}
-
-\begin{frame}{Relatives share alleles}
-\begin{itemize}
-  \item PCA looks at how genotypes co-vary between individuals.
-  \item Two sources: shared \textbf{ancestry} and recent \textbf{relatedness}.
-\end{itemize}
-\[ E\big[(g_i-2\pi)(g_j-2\pi)\big]
- = \underbrace{4(\pi_i-\pi)(\pi_j-\pi)}_{\text{ancestry: few axes $\to$ the PCs}}
- \;+\; \underbrace{4\,\phi_{ij}\sqrt{\pi_i(1-\pi_i)\,\pi_j(1-\pi_j)}}_{\text{relatedness: should not shape the PCs}} \]
-\aside{$g_i$: genotype of individual $i$ at a SNP (0, 1 or 2 copies of an allele);
-$\pi$: allele frequency in the sample; $\pi_i$: individual allele frequency, given $i$'s ancestry;\\
-$\phi_{ij}$: kinship given ancestry, the chance that an allele drawn from each is
-identical by descent ($\tfrac14$ parent--offspring, $\tfrac18$ 2nd degree, 0 unrelated).}
-\vspace{4pt}
-\begin{itemize}
-  \item A family is a small, tight cluster --- PCA spends components on it.
-\end{itemize}
-\end{frame}
-
-\begin{frame}{Growing $N$: PC1 vs PC2}
-\centering
-\includegraphics[width=\linewidth]{bign_pc12.pdf}
-\take{The same 8 relatives, more and more unrelated individuals.}
-\aside{Real genotypes (admixTjeck2); truth: PCA of all 366 individuals.}
-\end{frame}
-
-\begin{frame}{Growing $N$: PC2 vs PC3}
-\centering
-\includegraphics[width=\linewidth]{bign_pc23.pdf}
-\take{Up to 20 per population PC3 is lost; from 40 it is back.}
-\aside{PC3 recovered ($R^2$): 0.04, 0.01, 0.20, 0.999, 1.00.}
-\end{frame}
-
-\begin{frame}{Growing $N$: PC3 vs PC4}
-\centering
-\includegraphics[width=\linewidth]{bign_pc34.pdf}
-\take{The relatives do not go away --- they move to higher PCs.}
-\end{frame}
-
-\begin{frame}{Growing $N$: PC4 vs PC5}
-\centering
-\includegraphics[width=\linewidth]{bign_pc45.pdf}
-\take{At large $N$, PC4 and PC5 each belong to one family.}
-\aside{At 20 per population MXL appears on PC4: the ancestry axis the relatives pushed out of PC3.}
-\end{frame}
-
-\begin{frame}{Growing $N$: family share of the PCs}
-\centering
-\includegraphics[width=0.8\linewidth]{bign_eta.pdf}
-\take{Larger $N$ pushes the family axes past the ancestry axes.}
-\aside{PC4: YRI MZ pair; PC5: CEU parent--offspring. PC6 is YRI heterozygosity, not a family. Weaker relatives
-(sibs, 2nd degree) sit at the level of that noise: at 60 per population the CHB sibs are smeared over PC7--8.}
-\end{frame}
-
-\begin{frame}{Large samples: relatives are misplaced}
-\centering
-\includegraphics[width=0.8\linewidth]{largen_placement.pdf}
-\take{The ancestry axes survive --- the relatives move.}
-\aside{Simulated: $N=2000$, 30\% in families, 5 populations + an admixed group.}
-\end{frame}
-
-\begin{frame}{Large samples: family axes}
-\centering
-\includegraphics[width=\linewidth]{largen_familyaxes.pdf}
-\take{Every PC beyond the ancestry axes is a family axis.}
-\end{frame}
-
-\begin{frame}{The usual fixes}
-\begin{itemize}
-  \item \textbf{Drop relatives} --- you lose people.
-  \item \textbf{Project relatives} (PC-AiR) --- they are no longer in-sample.
-  \item \textbf{Screen with KING} --- biased for admixed people (later).
-\end{itemize}
-\take{We want to keep everyone in the PCA.}
+\take{Off the diagonal, relatives dominate --- so PC3 models them.}
 \end{frame}
 
 % ============================================================== small N
@@ -190,16 +112,6 @@ identical by descent ($\tfrac14$ parent--offspring, $\tfrac18$ 2nd degree, 0 unr
   \item \textbf{Remove the heterozygosity} from it: Chen \& Storey (next slide).
   \item \textbf{Whiten}: scale each person by their own noise, so the noise is the same for everyone.
 \end{enumerate}
-\vspace{6pt}
-\centering
-\begin{tabular}{@{}lcc@{}}
-\toprule
-5 per population, mean min $R^2$ & no relatives & with relatives \\
-\midrule
-diagonal kept & 0.02 & 0.02 \\
-diagonal imputed & \textbf{0.99} & \textbf{0.99} \\
-\bottomrule
-\end{tabular}
 \end{frame}
 
 \begin{frame}{Remove the heterozygosity: Chen \& Storey}
@@ -212,37 +124,13 @@ diagonal imputed & \textbf{0.99} & \textbf{0.99} \\
 \take{Not centred: PC1 is the mean --- ancestry starts at PC1+1.}
 \end{frame}
 
-\begin{frame}{A trap: centring}
-\begin{itemize}
-  \item The GRM uses \emph{centred} genotypes.
-  \item Centring spreads each person's diagonal over the whole matrix:
-\end{itemize}
-\[ C_{ij} \;\ni\; -\frac{d_i + d_j}{N} \]
-\begin{itemize}
-  \item Freeing the diagonal then frees nothing.
-\end{itemize}
-\end{frame}
-
-\begin{frame}{Work uncentred}
-\centering
-\begin{tabular}{@{}lc@{}}
-\toprule
-low-rank fit, diagonal free & failures, 5 per population \\
-\midrule
-centred, scaled GRM & \alert{82\%} \\
-uncentred, scaled GRM & \textbf{0\%} \\
-\bottomrule
-\end{tabular}
-\take{Scaling does not matter. Centring does.}
-\end{frame}
-
 \begin{frame}{Small $N$ as $L + S$ --- robust PCA}
 \centering
 \includegraphics[width=\linewidth]{smalln_ls.pdf}
-\take{$L$: GRM, diagonal imputed from the top PCs. $S$: the rest.}
 \aside{5 per population, no relatives. With relatives, $S$ will also hold the related pairs.\\
 Two ways to fit it: principal component pursuit (PCP; \texttt{aarobust-kin}) or a fixed-rank fit (the other three).\\
 Uncentred matrices: PC1 is the mean, so we write PC$k$+1 for the PC that corresponds to standard PC$k$.}
+\take{$L$: GRM, diagonal imputed from the top PCs. $S$: the rest.}
 \end{frame}
 
 \begin{frame}{Imputing the diagonal (1): the top $r$ PCs}
@@ -274,38 +162,46 @@ diagonal does not change the eigenvectors. PCs: eigenvectors of the whitened mat
 With relatives, $\Sigma$ will also hold the related pairs.}
 \end{frame}
 
+\begin{frame}{\texttt{detect-white}: the Chen \& Storey matrix}
+\centering
+\includegraphics[height=0.79\textheight,trim=0 0 0 0.9cm,clip]{ga_small_dw.pdf}
+\take{The same fit on $H$, then each person is scaled by their own noise.}
+\end{frame}
+
 \begin{frame}{Uncentred GRM fit}
 \centering
-\includegraphics[width=0.85\linewidth,trim=0 0 0 0.9cm,clip]{ga_small_fit.pdf}\par
-\vspace{-2pt}
-{\small
-\[ \text{add PC } r{+}1 \text{ if }\; \lambda_{r+1}(A - S) > 2\sigma\sqrt N, \qquad
-   \sigma^2 = \frac{1}{M^2}\sum_s \frac{\operatorname{Var}(g_{is}g_{js})}{w_s^2} \]}
-\vspace{-6pt}
-\aside{$\sigma$: the spread of an off-diagonal entry if there were no structure (unrelated individuals, one population);
-$2\sigma\sqrt N$: the largest eigenvalue of such pure noise (Wigner's semicircle).
-$\operatorname{Var}(g_ig_j) = E[g^2]^2 - (2f)^4$, $E[g^2] = 2f(1-f) + 4f^2$, $w_s = 2f_s(1-f_s)$.}
+\includegraphics[width=\linewidth]{ga_small_fit.pdf}\par
+\vspace{2pt}
+{\footnotesize Add PC $r{+}1$ if $\lambda_{r+1}(A - S) > 2\sigma\sqrt N$, \quad
+$\sigma^2 = \frac{1}{M^2}\sum_s \operatorname{Var}(g_{is}g_{js})/w_s^2$}\par
+\aside{$\sigma$: the spread of an off-diagonal entry with no structure; $2\sigma\sqrt N$: the largest eigenvalue of such noise
+(Wigner's semicircle, backup). $\operatorname{Var}(g_ig_j) = E[g^2]^2 - (2f)^4$, $E[g^2] = 2f(1-f) + 4f^2$, $w_s = 2f_s(1-f_s)$.}
 \take{Diagonal free; add imputation PCs while they rise above the noise edge.}
 \end{frame}
 
-\begin{frame}{\texttt{aarobust-kin}: PCP of the GRM}
+\begin{frame}{A trap: centering}
 \centering
-\includegraphics[width=\linewidth,trim=0 0 0 0.9cm,clip]{ga_small_aarobust.pdf}
-\take{Diagonal imputed with all eigenvectors --- no rank, but slow.}
-\aside{$L = C$ off the diagonal; its diagonal is the one with the smallest $\sum_k|\lambda_k|$ (nuclear norm).
-$C = L + S$ exactly, $S$ takes the rest of the diagonal. Each iteration needs a full eigendecomposition.}
-\end{frame}
-
-\begin{frame}{\texttt{detect-white}: the Chen \& Storey matrix}
-\centering
-\includegraphics[height=0.74\textheight,trim=0 0 0 0.9cm,clip]{ga_small_dw.pdf}
-\take{The same fit on $H$, then each person is scaled by their own noise.}
+\includegraphics[width=0.95\linewidth]{trap.pdf}
+\begin{itemize}
+  \item Centering spreads each person's noise over their whole row and column.
+  \item So freeing the diagonal no longer frees the noise.
+\end{itemize}
+\aside{Rank-cut fit with the diagonal free, 5 per population: centred, scaled GRM \alert{82\%} of runs wrong; uncentred, scaled GRM 0\%.}
+\take{Scaling does not matter. Centering does.}
 \end{frame}
 
 \begin{frame}{\texttt{dwg}: uncentred GRM, then whitened and centred}
 \centering
-\includegraphics[height=0.74\textheight,trim=0 0 0 0.9cm,clip]{ga_small_dwg.pdf}
+\includegraphics[height=0.79\textheight,trim=0 0 0 0.9cm,clip]{ga_small_dwg.pdf}
 \take{The uncentred fit, then whitened and centred --- PC1 is ancestry.}
+\end{frame}
+
+\begin{frame}{\texttt{aarobust-kin}: PCP of the GRM}
+\centering
+\includegraphics[width=\linewidth]{ga_small_aarobust.pdf}
+\aside{$L = C$ off the diagonal; its diagonal is the one with the smallest $\sum_k|\lambda_k|$ (nuclear norm).
+$C = L + S$ exactly, $S$ takes the rest of the diagonal. Each iteration needs a full eigendecomposition.}
+\take{All eigenvectors, not the top PCs: works centered --- but slow.}
 \end{frame}
 
 \begin{frame}{Four ways to fit $L + S$}
@@ -328,29 +224,119 @@ uncentred GRM fit & scaled, uncentred GRM & top $r$ PCs & $L$ \\
 \begin{frame}{Small $N$: comparing the methods}
 \centering
 \includegraphics[width=\linewidth]{smalln_compare.pdf}
-\take{The four are equally accurate --- \texttt{aarobust-kin} is the slow one.}
 \aside{No relatives, admixTjeck2, 5 replicates per $n$ (numbers in the backup). Run times: PCAone C++.}
+\take{The four are equally accurate --- \texttt{aarobust-kin} is the slow one.}
 \end{frame}
 
-\begin{frame}{Small $N$: the suggestion}
-\begin{itemize}
-  \item Use the \textbf{uncentred} GRM.
-  \item Leave the diagonal \textbf{free} (imputed), rather than correcting it as Chen \& Storey do:
-    their correction assumes HWE within individuals.
-  \item Built into \opt{robust} (\texttt{dwg}), together with the relatedness correction.
-\end{itemize}
-\vspace{6pt}
+\begin{frame}{Small $N$: all methods}
 \centering
-\begin{tabular}{@{}lcccc@{}}
+\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lccccc@{}}
 \toprule
-PCA wrong, per population: & 5 & 10 & 20 & 40 \\
+ & mean min $R^2$ & needs & top PCs & assumes & run time \\
+ & no relatives & $K$? & = ancestry? & HWE? & $N=2000$ \\
 \midrule
-standard PCA & \alert{100\%} & \alert{78\%} & \alert{60\%} & 0\% \\
-\texttt{dwg} & \textbf{0\%} & \textbf{0\%} & \textbf{0\%} & \textbf{0\%} \\
+standard PCA & \alert{0.02} & yes & yes & no & ? \\
+centred GRM, diagonal free & \alert{0.76} & upper bound & yes & no & ? \\
+Chen \& Storey diagonal & 0.98 & yes & no$^*$ & yes & ? \\
+uncentred GRM fit & 0.99 & upper bound & no$^*$ & no & ? \\
+\texttt{aarobust-kin} & 0.99 & no & yes & no & 248\,s \\
+\texttt{detect-white} & 0.99 & upper bound & no$^*$ & no & 9\,s \\
+\texttt{dwg} & 0.99 & upper bound & yes & no & 11\,s \\
 \bottomrule
-\end{tabular}\\[3pt]
-\aside{8 scenarios $\times$ 5 replicates, with and without relatives, incl.\ an inbred population and genotype errors.
-The Chen \& Storey diagonal works without relatives, but fails in 80\% of runs with an inbred population.}
+\end{tabular}\\[4pt]
+\aside{5 per population, admixTjeck2, 5 replicates. Run time: PCAone dense engine
+(\texttt{dwg} in its default engine: 1.1\,s at $N=1000$). ?: not measured.
+Upper bound: the rank comes from the noise edge, $k$ only caps it. $^*$PC1 is the mean; ancestry starts at PC1+1.}
+\end{frame}
+
+\begin{frame}{When HWE fails: inbreeding and genotype errors}
+\centering
+\includegraphics[width=0.8\linewidth]{hwe.pdf}
+\begin{itemize}
+  \item Chen \& Storey remove the heterozygosity expected under HWE: an inbred person keeps a leftover.
+  \item The four methods leave the diagonal free: \textbf{0\% wrong} in all three cases.
+\end{itemize}
+\aside{Runs wrong (min $R^2 < 0.95$), 5--40 per population, 10 replicates each, admixTjeck2.}
+\take{A free diagonal needs no HWE.}
+\end{frame}
+
+% ============================================================== why
+\sect{Why relatives break PCA}
+
+\begin{frame}{Relatives share alleles}
+\begin{itemize}
+  \item PCA looks at how genotypes co-vary between individuals.
+  \item Two sources: shared \textbf{ancestry} and recent \textbf{relatedness}.
+\end{itemize}
+\[ E\big[(g_i-2\pi)(g_j-2\pi)\big]
+ = \underbrace{4(\pi_i-\pi)(\pi_j-\pi)}_{\text{ancestry: few axes $\to$ the PCs}}
+ \;+\; \underbrace{4\,\phi_{ij}\sqrt{\pi_i(1-\pi_i)\,\pi_j(1-\pi_j)}}_{\text{relatedness: should not shape the PCs}} \]
+\aside{$g_i$: genotype of individual $i$ at a SNP (0, 1 or 2 copies of an allele);
+$\pi$: allele frequency in the sample; $\pi_i$: individual allele frequency, given $i$'s ancestry;\\
+$\phi_{ij}$: kinship given ancestry, the chance that an allele drawn from each is
+identical by descent ($\tfrac14$ parent--offspring, $\tfrac18$ 2nd degree, 0 unrelated).}
+\vspace{4pt}
+\begin{itemize}
+  \item A family is a small, tight cluster --- PCA spends components on it.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Growing $N$: PC1 vs PC2}
+\centering
+\includegraphics[width=\linewidth]{bign_pc12.pdf}
+\aside{Real genotypes (admixTjeck2); truth: PCA of all 366 individuals.}
+\take{The same 8 relatives, more and more unrelated individuals.}
+\end{frame}
+
+\begin{frame}{Growing $N$: PC2 vs PC3}
+\centering
+\includegraphics[width=\linewidth]{bign_pc23.pdf}
+\aside{PC3 recovered ($R^2$): 0.04, 0.01, 0.20, 0.999, 1.00.}
+\take{Up to 20 per population PC3 is lost; from 40 it is back.}
+\end{frame}
+
+\begin{frame}{Growing $N$: PC3 vs PC4}
+\centering
+\includegraphics[width=\linewidth]{bign_pc34.pdf}
+\take{The relatives do not go away --- they move to higher PCs.}
+\end{frame}
+
+\begin{frame}{Growing $N$: PC4 vs PC5}
+\centering
+\includegraphics[width=\linewidth]{bign_pc45.pdf}
+\aside{At 20 per population MXL appears on PC4: the ancestry axis the relatives pushed out of PC3.}
+\take{At large $N$, PC4 and PC5 each belong to one family.}
+\end{frame}
+
+\begin{frame}{Growing $N$: family share of the PCs}
+\centering
+\includegraphics[width=0.8\linewidth]{bign_eta.pdf}
+\aside{PC4: YRI MZ pair; PC5: CEU parent--offspring. PC6 is YRI heterozygosity, not a family. Weaker relatives
+(sibs, 2nd degree) sit at the level of that noise: at 60 per population the CHB sibs are smeared over PC7--8.}
+\take{Larger $N$ pushes the family axes past the ancestry axes.}
+\end{frame}
+
+\begin{frame}{Large samples: relatives are misplaced}
+\centering
+\includegraphics[width=0.8\linewidth]{largen_placement.pdf}
+\aside{Simulated: $N=2000$, 30\% in families, 5 populations + an admixed group.}
+\take{The ancestry axes survive --- the relatives move.}
+\end{frame}
+
+\begin{frame}{Large samples: family axes}
+\centering
+\includegraphics[width=\linewidth]{largen_familyaxes.pdf}
+\take{Every PC beyond the ancestry axes is a family axis.}
+\end{frame}
+
+\begin{frame}{The usual fixes}
+\begin{itemize}
+  \item \textbf{Drop relatives} --- you lose people.
+  \item \textbf{Project relatives} (PC-AiR) --- they are no longer in-sample.
+  \item \textbf{Screen with KING} --- biased for admixed people (later).
+\end{itemize}
+\take{We want to keep everyone in the PCA.}
 \end{frame}
 
 % ============================================================== relatives
@@ -500,18 +486,38 @@ full sibs & 0.25 & 0.50 & 0.25 \\
 % ============================================================== evidence
 \sect{Does it work?}
 
-\begin{frame}{Realistic LD: HAPNEST, $N=5000$}
+\begin{frame}{Small $N$ with relatives}
 \centering
+\footnotesize\setlength{\tabcolsep}{5pt}
 \begin{tabular}{@{}lccc@{}}
 \toprule
- & standard & detect-white & \texttt{dwg} \\
+ & runs wrong & relatives found & relatives' error \\
+per population: & 5 / 10 / 20 / 40 & 5 / 10 / 20 / 40 & 5 \\
 \midrule
-relatives' placement error & 0.048 & 0.028 & \textbf{0.019} \\
-relatives found & -- & 97\% & \textbf{98\%} \\
-\quad cross-ancestry grandparents & -- & 66\% & \textbf{87\%} \\
-time & 14\,s & 100\,s & 21\,s \\
+standard PCA & \alert{100 / 60 / 30 / 0\%} & -- & \alert{0.40} \\
+\texttt{aarobust-kin} & 2 / 0 / 0 / 0\% & 88 / 85 / 82 / 88\% & 0.14 \\
+\texttt{detect-white} & 0 / 0 / 0 / 0\% & 85 / 85 / 77 / 87\% & 0.13 \\
+\texttt{dwg} & \textbf{0 / 0 / 0 / 0\%} & \textbf{94 / 95 / 96 / 100\%} & \textbf{0.11} \\
 \bottomrule
-\end{tabular}
+\end{tabular}\\[4pt]
+\aside{admixTjeck2, 10 scenarios incl.\ relatives of different ancestry, 5 replicates each; no false pairs for any method.
+Relatives found: true pairs with pedigree kinship $\ge\tau$.}
+\take{All three fix the PCs; \texttt{dwg} finds the most relatives.}
+\end{frame}
+
+\begin{frame}{Realistic LD: HAPNEST, $N=5000$}
+\centering
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & standard & \texttt{aarobust-kin} & \texttt{detect-white} & \texttt{dwg} \\
+\midrule
+relatives' placement error & 0.048 & -- & 0.028 & \textbf{0.019} \\
+relatives found & -- & -- & 97\% & \textbf{98\%} \\
+\quad cross-ancestry grandparents & -- & -- & 66\% & \textbf{87\%} \\
+time & 14\,s & too slow & 100\,s & 21\,s \\
+\bottomrule
+\end{tabular}\\[4pt]
+\aside{\texttt{aarobust-kin} needs a full eigendecomposition per iteration: about an hour per run at $N=5000$, not run.}
 \take{The missed pairs share less than expected: realised kinship $<\tau$.}
 \end{frame}
 
@@ -523,9 +529,11 @@ time & 14\,s & 100\,s & 21\,s \\
 \midrule
 standard PCA & up to 27\% & -- \\
 \texttt{aarobust-kin} & 0\% & 78--84\% \\
+\texttt{detect-white} & 0\% & 78--83\% \\
 \texttt{dwg} & \textbf{0\%} & \textbf{90--96\%} \\
 \bottomrule
-\end{tabular}
+\end{tabular}\\[4pt]
+\aside{CEU, CHB, YRI, ASW; 8 scenarios incl.\ relatives of different ancestry, 3 replicates each. The few extra pairs are real relatives in the panel.}
 \take{Bonus: it found real relatives in 1000 Genomes.}
 \end{frame}
 
@@ -642,6 +650,20 @@ standard PCA & \alert{0.02} & \alert{0.97} & 0.996 & 0.998 \\
 \bottomrule
 \end{tabular}\\[3pt]
 \aside{admixTjeck2, 5 replicates per $n$. The differences among the first five are within noise.}
+\end{frame}
+
+\begin{frame}{Backup: Wigner's semicircle and the noise edge}
+\centering
+\includegraphics[width=0.9\linewidth]{wigner.pdf}
+\begin{itemize}
+  \item A symmetric $N\times N$ matrix of independent noise (mean 0, spread $\sigma$): its eigenvalues
+    fill a semicircle on $[-2\sigma\sqrt N,\, 2\sigma\sqrt N]$ (Wigner, 1955).
+  \item So with no structure, no eigenvalue goes beyond $2\sigma\sqrt N$: the \textbf{noise edge}.
+  \item A structure axis of strength $\theta$ shows up beyond the edge only if $\theta > \sigma\sqrt N$
+    (at $\theta + \sigma^2 N/\theta$); weaker axes are lost in the noise.
+\end{itemize}
+\aside{For the GRM, $\sigma$ is the spread of an off-diagonal entry for unrelated individuals; the diagonal is in $S$.
+Linked SNPs make the real noise somewhat larger, so the edge is approximate.}
 \end{frame}
 
 \end{document}

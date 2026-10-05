@@ -378,13 +378,13 @@ Restoring the uncentred Gram needs $f$ and the cross term $u$, one number per in
 
 ##### The method.
 
-1.  *Matrix.* The uncentred, SNP-standardised Gram $A_s=GW^{-1}G'/M$ with $W=\mathrm{diag}(2f(1-f))$, restored as above if the data arrive centred. No heterozygosity is subtracted.
+1.  *Matrix.* The uncentred, SNP-standardised Gram $A_s=GW^{-1}G'/M$ with $W=\mathrm{diag}(2f(1-f))$, built directly from the uncentred genotypes (out of core PCAone’s reader returns centred genotypes and $f$ is added back, i.e. the restoration above). No heterozygosity is subtracted.
 
 2.  *Detection*, as in `detect-white`: rank raised from 1; at each rank, alternate $L=$ rank-$r$ eigen-fit of $A_s-S$, $R=A_s-L$, $S_{ij}=R_{ij}$ for candidate pairs (KING, then the screen below) with $\hat\phi_{ij}=R_{ij}/(2\sqrt{v_iv_j})>\tau$, and $S_{ii}=R_{ii}$ (free diagonal). The kinship is scaled by the *fitted* noise $v_i=A_{s,ii}-L_{ii}$, as in `aarobust-kin`, not by heterozygosity.
 
 3.  *Rank* from the noise edge on the GRM scale, $2\sigma\sqrt N$ with $\sigma^2=\sum_s\big(E[g^2]^2-(2f_s)^4\big)/(2f_s(1-f_s))^2/M^2$, at most $k+1$ (the extra one is the mean component); localised family axes do not count (see the candidate screen).
 
-4.  *Whitening*: $\Sigma=v^{1/2}(I+2\Psi)v^{1/2}$; the PCs are eigenvectors $2..k+1$ of $\Sigma^{-1/2}A_s\Sigma^{-1/2}$, mapped back by $\Sigma^{1/2}$.
+4.  *Whitening and centring*: $\Sigma=v^{1/2}(I+2\Psi)v^{1/2}$; the whitened matrix $\Sigma^{-1/2}A_s\Sigma^{-1/2}$ is centred by projecting out $\Sigma^{-1/2}\mathbf 1$, and the PCs are its top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$ (see *Final PCs* above).
 
 ##### Why whitening, not the PCs of $L$ or of the imputed GRM.
 
@@ -768,6 +768,23 @@ In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 an
 
 - **Rank.** The noise edge chose the correct rank (5) in every run.
 
+##### The four small-$N$ methods side by side
+
+(`scripts/relatepca/four_methods_bench.py`; admixTjeck2, $k=3$, $n=5$–40 per population; the prototypes, which PCAone reproduces). Six scenarios that break HWE within individuals (an inbred individual, inbred cousins, an inbred population, 1% genotype errors, the last two with MZ twins; 10 replicates) and ten relatives scenarios (including relatives of different ancestry; 5 replicates). The HWE-based Chen & Storey diagonal is shown for reference (same data sets, `results/hwe.tsv`).
+
+|  |  |  |  |  |
+|:---|:--:|:--:|:--:|:--:|
+|  | HWE scenarios: runs wrong | relatives: runs wrong | relatives found | relatives’ error |
+|  | (inbred ind. / inbred pop. / 1% errors) | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) | ($n=5$) |
+| standard PCA | 30% / 25% / 25% | 100 / 60 / 30 / 0% | – | 0.40 |
+| Chen & Storey diagonal (HWE) | 11% / 24% / 4% | – | – | – |
+| uncentred GRM fit | 0 / 0 / 0 | 0 / 0 / 0 / 0 | 85 / 85 / 82 / 88% | 0.14 |
+| `aarobust-kin` | 0 / 0 / 0 | 2 / 0 / 0 / 0% | 88 / 85 / 82 / 88% | 0.14 |
+| `detect-white` | 0 / 0 / 0 | 0 / 0 / 0 / 0 | 85 / 85 / 77 / 87% | 0.13 |
+| **`dwg`** | 0 / 0 / 0 | 0 / 0 / 0 / 0 | **94 / 95 / 96 / 100%** | **0.11** |
+
+**Table 13.** The four methods leave the diagonal free and need no HWE within individuals; the HWE-based correction fails with inbreeding. With relatives all four fix the PCs; `dwg` finds the most relatives (its admixture-aware screen). No method reported false pairs. Wrong: min $R^2<0.95$.
+
 ##### Realistic LD and ancestry (HAPNEST).
 
 Synthetic biobank genotypes with realistic LD (HAPNEST; chromosomes 12–22, LD-pruned to 68,044 SNPs; six ancestries, three of them admixed). $N=5000$ with 30% in families built by transmission with recombination, including relatives of different ancestry; truth from a disjoint reference panel of 3600 (five ancestry axes).
@@ -775,10 +792,11 @@ Synthetic biobank genotypes with realistic LD (HAPNEST; chromosomes 12–22, LD-
 |  | min $R^2$ (5 axes) | relatives’ error | family axes ($k=20$) | recall | grandparent across ancestries | false pairs | time |  |
 |:---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | standard PCA | 0.9987 | 0.048 | 15 of 15 | – | – | – | 14 s |  |
+| `aarobust-kin` | – | – | – | – | – | – | too slow |  |
 | `detect-white` | 0.9977 | 0.028 | 0 | 97.3% | 66% | 0 | 100 s |  |
 | **`dwg`** | **0.9988** | **0.019** | 0 | **98.3%** | **87%** | 0 | **21 s** |  |
 
-**Table .** HAPNEST, $N=5000$ (1254 true pairs with pedigree kinship $\ge\tau$; 16 threads). The dense and operator engines of `dwg` give identical pairs and PCs. All 22 pairs `dwg` misses have realised kinship below $\tau$ (PC-adjusted 0.057–0.087): recombination makes realised relatedness of 2nd-degree pairs vary, and these are not detectable by design. Final $(k_0,k_1,k_2)$: parent–offspring (0.00, 1.00, 0.00), full sibs (0.25, 0.50, 0.26), 2nd degree (0.50, 0.50, 0.00), MZ (0, 0, 1).
+**Table .** HAPNEST, $N=5000$ (1254 true pairs with pedigree kinship $\ge\tau$; 16 threads; `aarobust-kin` needs a full eigendecomposition per PCP iteration, about an hour per run at this $N$, and was not run). The dense and operator engines of `dwg` give identical pairs and PCs. All 22 pairs `dwg` misses have realised kinship below $\tau$ (PC-adjusted 0.057–0.087): recombination makes realised relatedness of 2nd-degree pairs vary, and these are not detectable by design. Final $(k_0,k_1,k_2)$: parent–offspring (0.00, 1.00, 0.00), full sibs (0.25, 0.50, 0.26), 2nd degree (0.50, 0.50, 0.00), MZ (0, 0, 1).
 
 ##### A second real panel (1000 Genomes with ASW).
 
@@ -789,7 +807,7 @@ CEU, CHB, YRI and the admixed ASW (366 individuals, 100k complete SNPs); relativ
 | standard PCA | 27% / 10% / 0 | – | – | 0.23 |
 | `aarobust-kin` | 0 / 0 / 0 | 84% / 78% / 80% | 44% | 0.045 / 0.045 |
 | `detect-white` | 0 / 0 / 0 | 83% / 78% / 78% | 44% | 0.03 / 0.07 |
-| **`dwg`** | 0 / 0 / 0 | **90% / 95% / 96%** | **100%** | 0.036 / 0.041 |
+| **`dwg`** | 0 / 0 / 0 | **90% / 95% / 96%** | **100%** | 0.035 / 0.040 |
 
 **Table .** 1000 Genomes panel. The pairs reported beyond the simulated pedigree are real relatives in the panel (e.g. NA20317/NA20318, kinship 0.25), found by every robust method.
 
