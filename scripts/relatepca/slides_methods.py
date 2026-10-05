@@ -18,6 +18,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import FancyArrowPatch  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -64,14 +65,22 @@ def r2_of(U, T):
 
 
 def draw(G, pop, T, mat, mat_title, mat_kw, L, L_title, s_diag, s_title, U, title, out, steps, sigma=None,
-         shift=1, raw=None, sigma_title="$\\Sigma$ = diag($v$)", centre=False):
+         shift=1, raw=None, sigma_title="$\\Sigma$ = diag($v$)", centre=False, eig=None):
     """shift=1 for uncentred matrices: their PC1 is the mean, so the ancestry
     PCs are labelled PC1+1, PC2+1, ... (PCk+1 corresponds to standard PCk)"""
     N = len(G)
-    if sigma is None:
-        widths = [1.0, 1, 1, 1, 1.05]
-        fig = plt.figure(figsize=(2.3 * len(widths), 3.0))
-        ax = F.panel_axes(fig, widths, 0.85)
+    if sigma is None and eig is None:
+        # one row, tight gaps (bigger panels at slide width)
+        fig = plt.figure(figsize=(11.5, 3.0))
+        ax = F.panel_axes(fig, [1.0, 1, 1, 1, 1.05], 0.62, left=0.01, bottom=0.15, height=0.66)
+    elif sigma is None:
+        # two rows: genotypes -> matrix -> L + S, then eigenvalues -> PCs
+        fig = plt.figure(figsize=(12, 4.8))
+        ax = F.panel_axes(fig, [1.0, 1, 1, 1], 1.1, left=0.06, bottom=0.50, height=0.30)
+        if eig is not None:
+            ax += F.panel_axes(fig, [1.3, 1.05], 1.1, left=0.25, bottom=0.12, height=0.25)
+        else:
+            ax += F.panel_axes(fig, [1.05], 1.1, left=0.40, bottom=0.08, height=0.29)
     else:
         # two rows: genotypes -> matrix -> L + S, then Sigma -> whitened -> PCs
         fig = plt.figure(figsize=(9.2, 5.6))
@@ -84,6 +93,20 @@ def draw(G, pop, T, mat, mat_title, mat_kw, L, L_title, s_diag, s_title, U, titl
            vmax=mat_kw.get("vmax"))
     diag_heat(ax[3], s_diag, s_title, np.abs(s_diag).max(), pop)
     j = 4
+    if eig is not None:
+        lam, edge, r = eig
+        x = np.arange(1, len(lam) + 1)
+        ax[4].bar(x, lam, color=["#0072B2" if i < r else "#BBBBBB" for i in range(len(lam))])
+        ax[4].axhline(edge, color="#D55E00", lw=1, ls="--")
+        ax[4].text(len(lam) + 0.4, edge * 1.4, "noise edge", ha="right", fontsize=8, color="#D55E00")
+        ax[4].set_yscale("log")
+        ax[4].set_xticks(x)
+        ax[4].tick_params(labelsize=7)
+        ax[4].set_xlabel("eigenvalue", color=MUTED, fontsize=8)
+        ax[4].set_title(f"rank {r}: eigenvalues above\nthe noise edge (blue)", color=INK)
+        for sp in ["top", "right"]:
+            ax[4].spines[sp].set_visible(False)
+        j = 5
     if sigma is not None:
         diag_heat(ax[4], sigma, sigma_title, np.abs(sigma).max(), pop)
         Wm = raw / np.sqrt(np.outer(sigma, sigma))  # whitened: every entry A_ij / sqrt(v_i v_j)
@@ -123,7 +146,6 @@ def draw(G, pop, T, mat, mat_title, mat_kw, L, L_title, s_diag, s_title, U, titl
     F.arrow(fig, ax[1], ax[2], steps[1])
     F.plus(fig, ax[2], ax[3])
     if sigma is not None:
-        from matplotlib.patches import FancyArrowPatch
         b3, b4 = ax[3].get_position(), ax[4].get_position()
         xs, xb, ym = (b3.x0 + b3.x1) / 2, (b4.x0 + b4.x1) / 2, b3.y0 - 0.035
         # elbow: down from S, left along the gap between the rows, down into Sigma
@@ -139,11 +161,22 @@ def draw(G, pop, T, mat, mat_title, mat_kw, L, L_title, s_diag, s_title, U, titl
             F.arrow(fig, ax[6], ax[7], steps[3])
         else:
             F.arrow(fig, ax[5], ax[6], steps[3])
-    else:
+    elif eig is None:
         F.arrow(fig, ax[3], ax[4], steps[2])
-    fig.text(0.5, 0.96, title, ha="center", fontsize=11, color=INK, weight="bold")
-    hs = [plt.Line2D([], [], marker="o", ls="", color=PCOL[p], markeredgecolor="white", markersize=6) for p in POPS]
-    fig.legend(hs, POPS, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.02), fontsize=8)
+    else:
+        # elbow from S down to the bottom row
+        b3, b4 = ax[3].get_position(), ax[4].get_position()
+        xs, xb, ym = (b3.x0 + b3.x1) / 2, (b4.x0 + b4.x1) / 2, b3.y0 - 0.035
+        fig.add_artist(plt.Line2D([xs, xs, xb], [b3.y0 - 0.01, ym, ym], transform=fig.transFigure, color=MUTED,
+                                  lw=1.0))
+        fig.add_artist(FancyArrowPatch((xb, ym), (xb, b4.y1 + 0.085), transform=fig.transFigure,
+                                       arrowstyle="-|>", mutation_scale=10, color=MUTED, lw=1.0))
+        fig.text((xs + xb) / 2, ym + 0.008, steps[2].replace("\n", " "), ha="center", va="bottom", fontsize=8,
+                 color=MUTED)
+        if eig is not None:
+            F.arrow(fig, ax[4], ax[5], steps[3])
+    if not (sigma is None and eig is None):  # one-row figures: the slide title says it
+        fig.text(0.5, 0.96, title, ha="center", fontsize=11, color=INK, weight="bold")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(out, "R2", np.round(r2, 3))
@@ -325,6 +358,143 @@ def whitening_fig(bfile, out, n=5):
     print(out, "v range", np.round([v.min(), v.max()], 3))
 
 
+def trap_fig(bfile, out, n=5):
+    """the centring trap: the diagonal noise D (fitted noise v of the
+    uncentred fit) and the centred noise J D J, whose off-diagonal entries
+    -(d_i + d_j)/N + mean(d)/N spread each person's noise over their row"""
+    ds, _ = F.dataset(bfile, n=n, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    A, f, w, _ = W.grm_scaled_uncentred(G)
+    N = len(A)
+    L, _, _, _, _ = DL.fit_loc(A, B.TAU, np.zeros((N, N), bool), W.noise_edge(f, w, N), K + 1, 4, kin_check=True)
+    d = np.maximum(np.diag(A) - np.diag(L), 1e-6)
+    J = np.eye(N) - 1.0 / N
+    JDJ = J @ np.diag(d) @ J
+    fig = plt.figure(figsize=(11, 3.8))
+    ax0 = fig.add_axes([0.03, 0.12, 0.24, 0.74])
+    ax1 = fig.add_axes([0.40, 0.12, 0.24, 0.74])
+    ax2 = fig.add_axes([0.74, 0.16, 0.25, 0.70])
+    diag_heat(ax0, d, "noise $D$: only on the diagonal", d.max(), pop)
+    masked = JDJ.copy()
+    np.fill_diagonal(masked, np.nan)
+    off = ~np.eye(N, dtype=bool)
+    vmax = np.abs(JDJ[off]).max()
+    cm = plt.get_cmap("RdBu_r").copy()
+    cm.set_bad("#d0d0d0")
+    ax1.imshow(masked, cmap=cm, vmin=-vmax, vmax=vmax, interpolation="nearest")
+    for i, p in enumerate(pop):
+        ax1.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+    ax1.set_title("after centering: $J\\,D\\,J$\n(diagonal hidden)", color=INK)
+    F.arrow(fig, ax0, ax1, "center\n$J$: the centering\nmatrix")
+    # each person's leaked noise: the mean of their off-diagonal row
+    rowmean = np.array([JDJ[i, off[i]].mean() for i in range(N)])
+    ax2.bar(np.arange(N), rowmean, color=[PCOL[p] for p in pop])
+    ax2.axhline(0, color=MUTED, lw=0.6)
+    ax2.set_xticks([])
+    ax2.set_xlabel("individuals (by population)", color=MUTED)
+    ax2.set_ylabel("mean off-diagonal entry", color=MUTED)
+    ax2.set_title("each person's noise is now\nin their whole row", color=INK)
+    for sp in ["top", "right"]:
+        ax2.spines[sp].set_visible(False)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, "d range", np.round([d.min(), d.max()], 3), "off-diag JDJ range", np.round([JDJ[off].min(), JDJ[off].max()], 4))
+
+
+def hwe_fig(results, out):
+    """HWE within individuals: runs wrong (min R2 < 0.95) for the four
+    methods (results/four_methods.tsv, 10 replicates per n = 5-40) with
+    standard PCA and the HWE-based Chen & Storey diagonal as references
+    (results/hwe.tsv, the same datasets: replicates 0-9; k = 3)"""
+    import pandas as pd
+    d4 = pd.read_csv(os.path.join(results, "four_methods.tsv"), sep="\t")
+    d4 = d4[d4.group == "hwe"]
+    dh = pd.read_csv(os.path.join(results, "hwe.tsv"), sep="\t")
+    dh = dh[(dh.rep < 10) & (dh.method == "lrkin_cs_kc")].assign(method="cs_diag")
+    d = pd.concat([d4[["scen", "n", "rep", "method", "minR2"]], dh[["scen", "n", "rep", "method", "minR2"]]])
+    d["fail"] = d.minR2 < 0.95
+    scen = [("inbred1", "one inbred\nindividual"), ("inbredpop", "inbred\npopulation"), ("err1", "1% genotype\nerrors")]
+    meth = [("standard", "standard PCA", "#BBBBBB"),
+            ("cs_diag", "Chen & Storey diagonal (HWE)", "#E69F00"),
+            ("unc_fit", "uncentred GRM fit", "#56B4E9"),
+            ("aarobust_kin", "aarobust-kin", "#CC79A7"),
+            ("detect_white", "detect-white", "#009E73"),
+            ("dwg", "dwg", "#0072B2")]
+    fig, ax = plt.subplots(figsize=(9, 3.6))
+    w = 0.8 / len(meth)
+    for i, (m, lab, c) in enumerate(meth):
+        y = [100 * d[(d.method == m) & (d.scen == s_)].fail.mean() for s_, _ in scen]
+        ax.bar(np.arange(len(scen)) - 0.4 + w * (i + 0.5), y, w, color=c, label=lab)
+        if m in FOUR_KEYS:
+            for x_, y_ in zip(np.arange(len(scen)) - 0.4 + w * (i + 0.5), y):
+                if y_ < 0.5:
+                    ax.text(x_, 0.6, "0", ha="center", fontsize=7, color=c)
+    ax.set_xticks(np.arange(len(scen)))
+    ax.set_xticklabels([t for _, t in scen])
+    ax.set_ylabel("runs wrong (%)", color=MUTED)
+    leg = ax.legend(frameon=False, fontsize=9, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    for t in leg.get_texts():
+        if t.get_text() in ("uncentred GRM fit", "aarobust-kin", "detect-white", "dwg"):
+            t.set_fontweight("bold")
+    for sp in ["top", "right"]:
+        ax.spines[sp].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    for m, lab, _ in meth:
+        print(lab, [round(100 * d[(d.method == m) & (d.scen == s_)].fail.mean(), 1) for s_, _ in scen])
+
+
+FOUR_KEYS = {"unc_fit", "aarobust_kin", "detect_white", "dwg"}
+
+
+def wigner_fig(out, N=600, seed=7):
+    """Wigner's semicircle: eigenvalues of a symmetric noise matrix with
+    independent entries (sd sigma) fill [-2 sigma sqrt N, 2 sigma sqrt N];
+    added structure (spikes theta) gives eigenvalues beyond the edge only if
+    theta > sigma sqrt N (then at theta + sigma^2 N / theta)"""
+    rng = np.random.default_rng(seed)
+    sigma = 1 / np.sqrt(N)  # edge at 2
+    X = rng.normal(0, sigma, (N, N))
+    E = (X + X.T) / np.sqrt(2)
+    lam0 = np.linalg.eigvalsh(E)
+    thetas = [3.0, 2.0, 0.7]
+    Q, _ = np.linalg.qr(rng.normal(size=(N, len(thetas))))
+    lam1 = np.linalg.eigvalsh(E + (Q * thetas) @ Q.T)
+    x = np.linspace(-2, 2, 400)
+    dens = np.sqrt(np.maximum(4 - x ** 2, 0)) / (2 * np.pi)
+    fig, axs = plt.subplots(1, 2, figsize=(11, 3.6))
+    for ax, lam, t in [(axs[0], lam0, "pure noise"), (axs[1], lam1, "noise + 3 structure axes")]:
+        ax.hist(lam, bins=60, density=True, color="#BBBBBB", label="eigenvalues")
+        ax.plot(x, dens, color="#0072B2", lw=2, label="semicircle")
+        ax.axvline(2, color="#D55E00", ls="--", lw=1)
+        ax.text(2.05, 0.33, "edge\n$2\\sigma\\sqrt{N}$", color="#D55E00", fontsize=9, va="top")
+        ax.set_xlim(-2.6, 4.0)
+        ax.set_ylim(0, 0.36)
+        ax.set_yticks([])
+        ax.set_xlabel("eigenvalue (units of $\\sigma\\sqrt{N}$)", color=MUTED)
+        ax.set_title(t, color=INK)
+        for sp in ["top", "right", "left"]:
+            ax.spines[sp].set_visible(False)
+    out_l = lam1[lam1 > 2.05]
+    axs[1].scatter(out_l, np.full(len(out_l), 0.02), marker="v", s=80, color="#0072B2", zorder=3)
+    axs[1].text(out_l.mean(), 0.07, "strong axes:\nbeyond the edge", ha="center", fontsize=9, color="#0072B2")
+    axs[1].text(-2.5, 0.33, "weak axis (strength 0.7 < 1):\nhidden in the noise", fontsize=9, color=MUTED, va="top")
+    axs[0].legend(frameon=False, fontsize=9, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, "max noise eig", round(lam0.max(), 3), "outliers", np.round(out_l, 3))
+
+
+FOUR = {"dwg", "uncentred GRM fit", "detect-white", "aarobust-kin"}
+
+
 def compare_fig(results, out):
     """accuracy without relatives (scenario "none", 5 replicates per n, k=3)
     and run time of the C++ implementations"""
@@ -343,7 +513,9 @@ def compare_fig(results, out):
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.0))
     for name, d, c, ls in acc:
         m = d.groupby("n").minR2.mean()
-        a1.plot(m.index, m.values, ls=ls, color=c, lw=2, marker="o", ms=5, label=name)
+        main = name in FOUR
+        a1.plot(m.index, m.values, ls=ls, color=c, lw=2.6 if main else 1.2, marker="o", ms=6 if main else 4,
+                label=name, zorder=3 if main else 2)
     a1.set_xscale("log")
     a1.set_xticks([5, 10, 20, 40])
     a1.set_xticklabels(["5", "10", "20", "40"])
@@ -352,7 +524,10 @@ def compare_fig(results, out):
     a1.set_xlabel("individuals per population")
     a1.set_ylabel("mean min $R^2$ (3 ancestry axes)")
     a1.set_title("accuracy, no relatives", color=INK)
-    a1.legend(frameon=False, fontsize=8, loc="lower right")
+    leg = a1.legend(frameon=False, fontsize=8, loc="lower right", title="bold: the four methods", title_fontsize=8)
+    for t in leg.get_texts():
+        if t.get_text() in FOUR:
+            t.set_fontweight("bold")
     # run time, C++ dense engine (results/robust_speed_dense_cpp.txt, dwg_speed_cpp.txt)
     # and dwg in its default operator engine (methods document)
     t = {"aarobust-kin": ([500, 1000, 2000], [4.71, 30.71, 247.66], "#E69F00", "-"),
@@ -380,6 +555,15 @@ def compare_fig(results, out):
 def main():
     bfile, outdir = sys.argv[1], sys.argv[2]
     os.makedirs(outdir, exist_ok=True)
+    if len(sys.argv) > 4 and sys.argv[3] == "hwe":
+        hwe_fig(sys.argv[4], os.path.join(outdir, "hwe.pdf"))
+        return
+    if len(sys.argv) > 3 and sys.argv[3] == "trap":
+        trap_fig(bfile, os.path.join(outdir, "trap.pdf"))
+        return
+    if len(sys.argv) > 3 and sys.argv[3] == "wigner":
+        wigner_fig(os.path.join(outdir, "wigner.pdf"))
+        return
     if len(sys.argv) > 3 and sys.argv[3] == "impute":
         impute_topr_fig(bfile, os.path.join(outdir, "impute_topr.pdf"))
         nuclear_fig(bfile, os.path.join(outdir, "impute_nuclear.pdf"))

@@ -83,9 +83,7 @@ def main(bfile, out):
     F.geno(top[0], G[o][:, :160], po)
     F.heat(top[1], P(A), "GRM $A$\n(scaled, not centred)", pop=po, centre=True)
     F.heat(top[2], P(Limp), f"$L$: diag. + pairs imputed\nby top {r - 1} PCs (rank {r})", pop=po, centre=True)
-    Sd = P(S).copy()
-    np.fill_diagonal(Sd, 0)
-    F.heat(top[3], Sd, "$S$: diagonal + pairs\n$\\hat\\phi>\\tau$ (scaled by $v$)", sparse=True, pop=po,
+    F.heat(top[3], P(S), "$S$: diagonal + pairs\n$\\hat\\phi>\\tau$ (scaled by $v$)", sparse=True, pop=po,
            diag_dots=True)
     F.heat(bot[0], P(Sig), "$\\Sigma$: noise $v$\n+ families", sparse=True, pop=po, diag_dots=True)
     Mwo = P(Mw)
