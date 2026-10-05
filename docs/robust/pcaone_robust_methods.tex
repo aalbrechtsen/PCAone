@@ -32,6 +32,24 @@ The \opt{robust} option of PCAone computes PCs in which close relatives keep
 their place in the sample but do not shape the axes. Every individual is
 analysed in-sample: nothing is projected.
 
+Figure~\ref{fig:problem} shows both problems: a few relatives make standard
+PCA lose an ancestry axis, and with 5 individuals per population the same
+happens without any relatives (Section~\ref{sec:smalln}).
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{methods/hook_relatives.pdf}\\[4pt]
+\includegraphics[width=\linewidth]{methods/hook_smalln.pdf}
+\caption{The problem. Left: the populations (MXL is admixed, European and
+Native American). Middle: the reference truth (PC2 vs PC3). Right: standard
+PCA mapped onto the truth by least squares on the unrelated individuals.
+Top: 10 unrelated individuals per population plus 8 relatives (stars); PC3
+is lost ($R^2=0.01$). Bottom: 5 individuals per population, no relatives;
+PC3 is lost as well ($R^2=0.02$). admixTjeck2 genotypes, 54k SNPs; made by
+\texttt{scripts/relatepca/slides\_hook.py}.}
+\label{fig:problem}
+\end{figure}
+
 \begin{table}[h]
 \centering\small
 \fitbox{\begin{tabular}{@{}llll@{}}

@@ -44,12 +44,12 @@ def main(tex, aux, out):
     def fig(m):
         block = m.group(1)
         cap, _ = caption_of(block)
-        g = re.search(r"\\includegraphics(\[[^]]*\])?\{methods/([a-z_]+)\.pdf\}", block)
+        g = re.findall(r"\\includegraphics(?:\[[^]]*\])?\{methods/([a-z_]+)\.pdf\}", block)
         lb = re.search(r"\\label\{([^}]*)\}", block)
         num = lab.get(lb.group(1), "") if lb else ""
         cap = re.sub(r"\\label\{[^}]*\}", "", cap)
-        return (f"\n\n\\includegraphics{{methods/{g.group(2)}.png}}\n\n"
-                f"\\noindent\\textbf{{Figure {num}.}} {cap}\n\n")
+        imgs = "".join(f"\n\n\\includegraphics{{methods/{x}.png}}\n\n" for x in g)
+        return f"{imgs}\\noindent\\textbf{{Figure {num}.}} {cap}\n\n"
     s = re.sub(r"\\begin\{figure\}(?:\[[^]]*\])?(.*?)\\end\{figure\}", fig, s, flags=re.S)
     # tables: the caption becomes a paragraph after the tabular
     def tab(m):
@@ -68,11 +68,12 @@ def main(tex, aux, out):
     s = s.replace("~", " ")
     tmp = out + ".tex"
     open(tmp, "w").write(s)
-    md = subprocess.run(["pandoc", "-f", "latex", "-t", "gfm+tex_math_dollars", "--wrap=none", "-N",
+    md = subprocess.run(["pandoc", "-f", "latex", "-t", "gfm+tex_math_dollars-tex_math_gfm", "--wrap=none", "-N",
                          "--shift-heading-level-by=1", tmp], capture_output=True, text=True, check=True).stdout
     title = ("# PCA robust to close relatives in PCAone: the `--robust` methods\n\n"
              "*relatePCA working notes. Markdown version of "
-             "[pcaone_robust_methods.pdf](pcaone_robust_methods.pdf); figures in [methods/](methods/).*\n\n")
+             "[pcaone_robust_methods.pdf](pcaone_robust_methods.pdf); figures in [methods/](methods/). "
+             "Talk: [slides/relatedness_pca.pdf](slides/relatedness_pca.pdf).*\n\n")
     # numbered headings as in the PDF (\subsection* stays unnumbered)
     unnumbered = {m.strip() for m in re.findall(r"\\subsection\*\{([^}]*)\}", open(tex).read())}
     lines, sec, sub = [], 0, 0
