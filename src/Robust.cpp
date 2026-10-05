@@ -771,14 +771,28 @@ void build_whitener(const Mat1D& v, const std::vector<Pair>& pairs, BlockDiag& W
 // noise: per-individual noise variance (D for CS whitening; the observed
 // diagonal minus the fitted structure for the free-diagonal version)
 // nstrict: number of leading pairs converged strictly (the structure rank)
+// centre (dwg): instead of dropping the first PC, the whitened matrix is
+// centred by projecting out u = Sigma^-1/2 1 (the mean direction in the
+// whitened space; the same as centring every SNP by its 1/v-weighted mean).
+// The whitened noise I becomes I - uu' (still flat), so the PCs are the top k.
 void whitened_cs(const Mat2D& AM, const Mat1D& noise, const std::vector<Pair>& pairs, int k, Mat1D& w, Mat2D& U,
-                 int nstrict = -1) {
+                 int nstrict = -1, bool centre = false) {
   const Eigen::Index n = AM.rows();
   BlockDiag Wm, Wh;
   build_whitener(noise, pairs, Wm, Wh);
   Mat2D B = Wm.apply(Mat2D(Wm.apply(AM).transpose()));
   Mat1D ww;
   Mat2D VV, V0 = rand_orth(n, std::min<Eigen::Index>(n, k + 7), 2);
+  if (centre) {
+    Mat1D u = Wm.apply(Mat2D::Ones(n, 1)).col(0);
+    u.normalize();
+    const Mat1D Bu = B * u;
+    B -= Bu * u.transpose() + u * Bu.transpose() - (u.dot(Bu)) * u * u.transpose();  // (I - uu') B (I - uu')
+    top_eig_warm(B, k, V0, ww, VV, nstrict > 0 ? nstrict - 1 : nstrict);
+    w = ww;
+    U = Wh.apply(VV);
+    return;
+  }
   top_eig_warm(B, k + 1, V0, ww, VV, nstrict);
   w = ww.tail(k);
   U = Wh.apply(VV).rightCols(k);
@@ -2066,20 +2080,25 @@ static void run_dwg_operator(Data* data, const Param& params) {
   // whitening of A_s with the fitted noise
   BlockDiag Wm, Wh;
   build_whitener(F.v, F.pairs, Wm, Wh);
-  auto wop = [&](const Mat2D& X) { return Wm.apply(As_apply(Wm.apply(X))); };
-  Eigen::HouseholderQR<Mat2D> qr0(Wm.apply(V));
+  // centred in the whitened space: project out u = Sigma^-1/2 1 (the mean
+  // direction), so the top k eigenvectors are the PCs (see whitened_cs)
+  Mat1D u = Wm.apply(Mat2D::Ones(N, 1)).col(0);
+  u.normalize();
+  auto proj = [&](const Mat2D& X) { return Mat2D(X - u * (u.transpose() * X)); };
+  auto wop = [&](const Mat2D& X) { return proj(Wm.apply(As_apply(Wm.apply(proj(X))))); };
+  Eigen::HouseholderQR<Mat2D> qr0(proj(Wm.apply(V)));
   Mat2D V0 = qr0.householderQ() * Mat2D::Identity(N, V.cols());
   Mat1D theta, res;
   Mat2D Vr;
   double resid = 1;
   int extra = -1;
   for (int it = 0; it < 5000; ++it) {
-    ritz_step(wop, V0, theta, Vr, resid, F.r, &res);
+    ritz_step(wop, V0, theta, Vr, resid, std::max(1, F.r - 1), &res);
     if (resid < conv_tol && extra < 0) extra = 0;
-    if (resid < conv_tol && (res.head(k + 1).maxCoeff() < std::max(conv_tol, 1e-6) || extra++ >= 10)) break;
+    if (resid < conv_tol && (res.head(k).maxCoeff() < std::max(conv_tol, 1e-6) || extra++ >= 10)) break;
   }
-  const Mat2D U = Wh.apply(Vr.block(0, 1, N, k));
-  const Mat1D w = theta.segment(1, k);
+  const Mat2D U = Wh.apply(Vr.leftCols(k));
+  const Mat1D w = theta.head(k);
   cao.print(tick.date(), "robust PCA (dwg):", passes, "passes over the genotypes in total");
   write_outputs(data, params, N, U, w, F.pairs, [&](int i, int j) {
     auto it = king_map.find({std::min(i, j), std::max(i, j)});
@@ -2309,7 +2328,7 @@ static void run_dwg_gl(Data* data, const Param& params) {
   const Mat1D noise = (As.diagonal() - F.L.diagonal()).cwiseMax(1e-6);
   Mat1D wv;
   Mat2D U;
-  whitened_cs(As, noise, F.pairs, k, wv, U, F.r);
+  whitened_cs(As, noise, F.pairs, k, wv, U, F.r, true);
 
   // final relatedness from the genotype likelihoods, leave-the-family-out IAF
   std::vector<int> root(N);
@@ -2479,7 +2498,7 @@ void run_robust(Data* data, const Param& params) {
               "),", pairs.size(), "related pairs;", n_ea, "candidates added by evalAdmix + k0;", rounds + 1,
               "screen rounds");
     const Mat1D noise = (As.diagonal() - F.L.diagonal()).cwiseMax(1e-6);
-    whitened_cs(As, noise, pairs, k, w, U, F.r);
+    whitened_cs(As, noise, pairs, k, w, U, F.r, true);
   } else if (mode == "cswhite") {
     cao.warn("--robust cswhite corrects the diagonal with heterozygosity, which assumes HWE within "
              "individuals; use detect-white with inbreeding or genotype errors");

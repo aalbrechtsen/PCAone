@@ -90,7 +90,7 @@ def dwg_loc(G, k, cand, c, kin_check=False):
     N = len(A)
     L, S, r, pairs, cand2 = fit_loc(A, B.TAU, cand, W.noise_edge(f, w, N), k + 1, c, kin_check=kin_check)
     v = np.maximum(np.diag(A) - np.diag(L), 1e-6)
-    U = I.whitened_noise(A, v, pairs, k)
+    U = I.whitened_noise(A, v, pairs, k, centre=True)
     ev, V = I.top_eig(L, r)
     # structure axes for the evalAdmix screen: drop family axes (kinship from
     # the residual with that axis put back)

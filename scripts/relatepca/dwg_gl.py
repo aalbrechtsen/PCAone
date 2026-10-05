@@ -233,7 +233,7 @@ def dwg_gl(GL, k, tau=B.TAU, rounds=3, screen_rounds=3, loo=False, deshrink=Fals
             if nk == key:
                 break
             key = nk
-        U = I.whitened_noise(R["A"], R["v"], R["pairs"], k)
+        U = I.whitened_noise(R["A"], R["v"], R["pairs"], k, centre=True)
         Ur = U[:, :max(R["r"] - 1, 1)]  # IAF from the robust PCs (leave-one-out)
         Pi = iaf_from_axes_loo(R["E"], Ur) if loo else iaf_from_axes(R["E"], Ur)
     R["U"] = U

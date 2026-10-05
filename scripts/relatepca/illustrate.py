@@ -319,9 +319,11 @@ def lr_kin_fd_auto(H, tau, D, edge, cand=None, rmax=50, iters=500):
     return L, S, total, r
 
 
-def whitened_noise(AM, noise, pairs_phi, k, floor=0.1):
+def whitened_noise(AM, noise, pairs_phi, k, floor=0.1, centre=False):
     """whitening of the raw Gram AM = G G'/M with a given per-individual noise
-    variance: Sigma = v^1/2 (I + 2 Psi) v^1/2 (CS whitening uses v = D)"""
+    variance: Sigma = v^1/2 (I + 2 Psi) v^1/2 (CS whitening uses v = D).
+    centre (dwg, as PCAone): project u = Sigma^-1/2 1 out of the whitened
+    matrix and take the top k, instead of dropping the first (mean) PC"""
     N = len(AM)
     d = np.sqrt(np.maximum(noise, 1e-12))
     R_ = np.eye(N)
@@ -331,6 +333,12 @@ def whitened_noise(AM, noise, pairs_phi, k, floor=0.1):
     w, v = np.linalg.eigh(Sig)
     w = np.maximum(w, floor * d.min() ** 2)
     Wm, Wh = (v / np.sqrt(w)) @ v.T, (v * np.sqrt(w)) @ v.T
+    if centre:
+        u = Wm @ np.ones(N)
+        u /= np.linalg.norm(u)
+        P = np.eye(N) - np.outer(u, u)
+        _, U = top_eig(P @ Wm @ AM @ Wm @ P, k)
+        return Wh @ U
     _, U = top_eig(Wm @ AM @ Wm, k + 1)
     return (Wh @ U)[:, 1:]
 
