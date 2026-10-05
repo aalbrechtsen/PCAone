@@ -7,6 +7,7 @@ ideas that matter, what is and is not established, and what to do next.
 
 | | |
 |---|---|
+| [robust/slides/](robust/slides/relatedness_pca.pdf) | Slides (Beamer, ~30 min): relatedness in PCA, the small-N problem, `dwg`, kinship for admixed individuals, evidence |
 | [robust/](robust/README.md) | `--robust`: PCA robust to close relatives — the methods (`dwg`, `detect-white`, `aarobust-kin`, …), graphical abstracts, the three sample-size regimes, final relatedness (k0, k1, k2) and the evidence; also as [PDF](robust/pcaone_robust_methods.pdf) |
 | [evaladmix.md](evaladmix.md) | `--evaladmix`: correlation of residuals from the top PCs, i.e. kinship. Accuracy against PC-Relate, RelateAdmix and the other evalAdmix routes |
 | [pcaone-ibd.md](pcaone-ibd.md) | `pcaone-ibd`: IBD sharing probabilities `(k0,k1,k2)`, which separate parent–offspring from full sibs |
