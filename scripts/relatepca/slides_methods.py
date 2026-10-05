@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Slide figures: one graphical abstract per small-N method (no relatives,
+5 per population, admixTjeck2), in the style of the methods document:
+genotypes -> matrix -> L + S (S = the diagonal) -> PCs.
+
+  ga_small_fit.pdf        uncentred GRM, rank from the noise edge, diagonal free
+  ga_small_aarobust.pdf   aarobust-kin: robust PCA of the GRM, diagonal unobserved
+  ga_small_dw.pdf         detect-white: Chen & Storey matrix, diagonal free, whitened
+  ga_small_dwg.pdf        dwg: uncentred GRM, diagonal free, whitened by the noise v
+
+usage: slides_methods.py <admixTjeck2 bfile> <outdir>
+"""
+import os
+import sys
+
+import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import benchmark as B  # noqa: E402
+import dw_grm as W  # noqa: E402
+import dwg_loc as DL  # noqa: E402
+import illustrate as I  # noqa: E402
+import methods_figs as F  # noqa: E402
+import slides_hook as S  # noqa: E402
+from methods_figs import INK, MUTED, PCOL, POPS  # noqa: E402
+
+K = 3
+
+
+def diag_heat(ax, d, title, vmax, pop):
+    """a matrix that is only its diagonal"""
+    N = len(d)
+    M = np.full((N, N), np.nan)
+    M[np.diag_indices(N)] = d
+    cm = plt.get_cmap("Reds").copy()
+    cm.set_bad("white")
+    ax.imshow(M, cmap=cm, vmin=0, vmax=vmax, interpolation="nearest")
+    for i, p in enumerate(pop):
+        ax.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for s in ax.spines.values():
+        s.set_edgecolor("#BBBBBB")
+    ax.set_title(title, color=INK)
+
+
+def imputed(M, Lr):
+    """the matrix that is eigendecomposed: M off the diagonal, the diagonal
+    predicted by the rank-r fit Lr (so M = L + S exactly, S = diag(M - Lr))"""
+    Mi = M.copy()
+    np.fill_diagonal(Mi, np.diag(Lr))
+    return Mi
+
+
+def r2_of(U, T):
+    Z = np.c_[U, np.ones(len(U))]
+    Bc, *_ = np.linalg.lstsq(Z, T, rcond=None)
+    return 1 - ((T - Z @ Bc) ** 2).sum(0) / ((T - T.mean(0)) ** 2).sum(0)
+
+
+def draw(G, pop, T, mat, mat_title, mat_kw, L, L_title, s_diag, s_title, U, title, out, steps, sigma=None,
+         shift=1, raw=None, sigma_title="$\\Sigma$ = diag($v$)", centre=False):
+    """shift=1 for uncentred matrices: their PC1 is the mean, so the ancestry
+    PCs are labelled PC1+1, PC2+1, ... (PCk+1 corresponds to standard PCk)"""
+    N = len(G)
+    if sigma is None:
+        widths = [1.0, 1, 1, 1, 1.05]
+        fig = plt.figure(figsize=(2.3 * len(widths), 3.0))
+        ax = F.panel_axes(fig, widths, 0.85)
+    else:
+        # two rows: genotypes -> matrix -> L + S, then Sigma -> whitened -> PCs
+        fig = plt.figure(figsize=(9.2, 5.6))
+        ax = F.panel_axes(fig, [1.0, 1, 1, 1], 0.85, bottom=0.56, height=0.32)
+        bw = [1, 1, 1, 1.05] if centre else [1, 1, 1.05]
+        ax += F.panel_axes(fig, bw, 0.85, left=0.015 if centre else 0.14, bottom=0.10, height=0.30)
+    F.geno(ax[0], G[:, :160], pop)
+    F.heat(ax[1], mat, mat_title, pop=pop, **mat_kw)
+    F.heat(ax[2], L, L_title, pop=pop, centre=mat_kw.get("centre", False),
+           vmax=mat_kw.get("vmax"))
+    diag_heat(ax[3], s_diag, s_title, np.abs(s_diag).max(), pop)
+    j = 4
+    if sigma is not None:
+        diag_heat(ax[4], sigma, sigma_title, np.abs(sigma).max(), pop)
+        Wm = raw / np.sqrt(np.outer(sigma, sigma))  # whitened: every entry A_ij / sqrt(v_i v_j)
+        if centre:
+            # dwg: the whitened matrix is not centred (all positive); project out Sigma^-1/2 1
+            ax[5].imshow(Wm, cmap="Reds", vmin=Wm.min(), vmax=np.percentile(Wm, 99), interpolation="nearest")
+            for i, p in enumerate(pop):
+                ax[5].add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p],
+                                              clip_on=False, lw=0))
+            ax[5].set_xticks([])
+            ax[5].set_yticks([])
+            ax[5].set_title("whitened: $A_{ij}/\\sqrt{v_i v_j}$\n(not centred: all positive)", color=INK)
+            u = 1 / np.sqrt(sigma)
+            u /= np.linalg.norm(u)
+            Pu = np.eye(N) - np.outer(u, u)
+            F.heat(ax[6], Pu @ Wm @ Pu, "centred: $\\Sigma^{-1/2}\\mathbf{1}$\nprojected out", pop=pop)
+            j = 7
+        else:
+            F.heat(ax[5], Wm, "whitened:\n$A_{ij}/\\sqrt{v_i v_j}$", pop=pop, centre=True)
+            j = 6
+    U = S.align_signs(U, T, np.arange(N))
+    r2 = r2_of(U, T)
+    lab = (lambda k: f"PC{k}+1") if shift else (lambda k: f"PC{k}")
+    S.scatter(ax[j], U, pop, np.zeros(N, bool), f"PCs: {lab(2)} vs {lab(3)}\nMXL axis $R^2$ = {r2[2]:.2f}",
+              a=1, b=2)
+    ax[j].set_xlabel(lab(2), color=MUTED)
+    ax[j].set_ylabel(lab(3), color=MUTED)
+    for t in ax[j].texts:
+        t.set_fontsize(9)
+    ax[j].title.set_fontsize(9)
+    ax[j].xaxis.label.set_fontsize(9)
+    ax[j].yaxis.label.set_fontsize(9)
+    for c in ax[j].collections:
+        c.set_sizes([16])
+    fig.canvas.draw()
+    F.arrow(fig, ax[0], ax[1], steps[0])
+    F.arrow(fig, ax[1], ax[2], steps[1])
+    F.plus(fig, ax[2], ax[3])
+    if sigma is not None:
+        from matplotlib.patches import FancyArrowPatch
+        b3, b4 = ax[3].get_position(), ax[4].get_position()
+        xs, xb, ym = (b3.x0 + b3.x1) / 2, (b4.x0 + b4.x1) / 2, b3.y0 - 0.035
+        # elbow: down from S, left along the gap between the rows, down into Sigma
+        fig.add_artist(plt.Line2D([xs, xs, xb], [b3.y0 - 0.01, ym, ym], transform=fig.transFigure, color=MUTED,
+                                  lw=1.0))
+        fig.add_artist(FancyArrowPatch((xb, ym), (xb, b4.y1 + 0.085), transform=fig.transFigure, arrowstyle="-|>",
+                                       mutation_scale=10, color=MUTED, lw=1.0))
+        fig.text((xs + xb) / 2, ym + 0.008, steps[2].replace("\n", " "), ha="center", va="bottom", fontsize=8,
+                 color=MUTED)
+        F.arrow(fig, ax[4], ax[5], "$\\Sigma^{-1/2} A\\, \\Sigma^{-1/2}$")
+        if centre:
+            F.arrow(fig, ax[5], ax[6], "centre")
+            F.arrow(fig, ax[6], ax[7], steps[3])
+        else:
+            F.arrow(fig, ax[5], ax[6], steps[3])
+    else:
+        F.arrow(fig, ax[3], ax[4], steps[2])
+    fig.text(0.5, 0.96, title, ha="center", fontsize=11, color=INK, weight="bold")
+    hs = [plt.Line2D([], [], marker="o", ls="", color=PCOL[p], markeredgecolor="white", markersize=6) for p in POPS]
+    fig.legend(hs, POPS, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.02), fontsize=8)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, "R2", np.round(r2, 3))
+
+
+def masked_heat(ax, M, title, pop, cmap="RdBu_r", centre=False):
+    """matrix with the diagonal shown as unknown (grey '?')"""
+    N = len(M)
+    M = np.array(M, float)
+    if centre:
+        J = np.eye(N) - 1.0 / N
+        M = J @ M @ J
+    off = ~np.eye(N, dtype=bool)
+    vmax = np.percentile(np.abs(M[off]), 99)
+    shown = M.copy()
+    np.fill_diagonal(shown, np.nan)
+    cm = plt.get_cmap(cmap).copy()
+    cm.set_bad("#d0d0d0")
+    ax.imshow(shown, cmap=cm, vmin=-vmax, vmax=vmax, interpolation="nearest")
+    for i in range(N):
+        ax.text(i, i, "?", ha="center", va="center", fontsize=6, color=INK)
+    for i, p in enumerate(pop):
+        ax.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title(title, color=INK)
+
+
+def impute_topr_fig(bfile, out, n=5, r=4, iters=500):
+    """imputing the diagonal with the top r PCs (scaled, uncentred GRM)"""
+    ds, _ = F.dataset(bfile, n=n, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    A, f, w, _ = W.grm_scaled_uncentred(G)
+    N = len(A)
+    off = ~np.eye(N, dtype=bool)
+    d = np.array([A[i, off[i]].mean() for i in range(N)])
+    At = A.copy()
+    for _ in range(iters):
+        np.fill_diagonal(At, d)
+        lam, V = np.linalg.eigh(At)
+        Lr = (V[:, -r:] * lam[-r:]) @ V[:, -r:].T
+        if np.max(np.abs(np.diag(Lr) - d)) < 1e-10:
+            break
+        d = np.diag(Lr).copy()
+    np.fill_diagonal(At, d)
+    lam = np.linalg.eigvalsh(At)[::-1]
+    edge = W.noise_edge(f, w, N)
+    fig = plt.figure(figsize=(12, 3.8))
+    ax0 = fig.add_axes([0.03, 0.12, 0.22, 0.74])
+    ax1 = fig.add_axes([0.36, 0.16, 0.27, 0.70])
+    ax2 = fig.add_axes([0.72, 0.16, 0.27, 0.70])
+    masked_heat(ax0, A, "GRM: diagonal unknown", pop, centre=True)
+    x = np.arange(1, 11)
+    ax1.bar(x, lam[:10], color=["#0072B2" if i < r else "#BBBBBB" for i in range(10)])
+    ax1.axhline(edge, color="#D55E00", lw=1, ls="--")
+    ax1.text(10.4, edge * 1.3, "noise edge", ha="right", fontsize=9, color="#D55E00")
+    ax1.set_yscale("log")
+    ax1.set_xticks(x)
+    ax1.set_xlabel("eigenvalue", color=MUTED)
+    ax1.set_title(f"keep the top {r} (blue), drop the rest", color=INK)
+    x2 = np.arange(N)
+    ax2.scatter(x2, np.diag(A), s=30, color=[PCOL[p] for p in pop], edgecolor="white", lw=0.4, label="observed")
+    ax2.scatter(x2, d, s=50, marker="_", color=INK, lw=1.6, label=f"imputed: diag. of top {r}")
+    ax2.set_xticks([])
+    ax2.set_xlabel("individuals (by population)", color=MUTED)
+    ax2.set_ylabel("diagonal", color=MUTED)
+    ax2.set_ylim(0, np.diag(A).max() * 1.2)
+    ax2.set_title("the diagonal", color=INK)
+    ax2.legend(frameon=False, fontsize=8, loc="upper left")
+    for ax in (ax1, ax2):
+        for s in ["top", "right"]:
+            ax.spines[s].set_visible(False)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, "eig 1-6", np.round(lam[:6], 3), "edge", round(edge, 3))
+
+
+def mushroom(ax):
+    """a cartoon nuclear explosion"""
+    from matplotlib.patches import Circle, Ellipse, Polygon
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    ax.add_patch(Ellipse((0.5, 0.08), 0.95, 0.12, color="#8C510A", alpha=0.6))  # dust ring
+    ax.add_patch(Polygon([[0.42, 0.1], [0.58, 0.1], [0.54, 0.55], [0.46, 0.55]], color="#E66101"))  # stem
+    ax.add_patch(Polygon([[0.45, 0.1], [0.55, 0.1], [0.52, 0.5], [0.48, 0.5]], color="#FDB863"))
+    ax.add_patch(Ellipse((0.5, 0.52), 0.34, 0.08, color="#B35806", alpha=0.8))  # collar
+    for (x, y, r, c) in [(0.5, 0.72, 0.2, "#B35806"), (0.33, 0.68, 0.13, "#E66101"), (0.67, 0.68, 0.13, "#E66101"),
+                         (0.42, 0.8, 0.14, "#F1A340"), (0.58, 0.8, 0.14, "#F1A340"), (0.5, 0.85, 0.12, "#FEE0B6"),
+                         (0.5, 0.7, 0.1, "#FFF7BC")]:
+        ax.add_patch(Circle((x, y), r, color=c))
+    ax.text(0.5, 0.71, r"$\|L\|_*$", ha="center", va="center", fontsize=18, color=INK, weight="bold")
+    for (x, y, rot) in [(0.08, 0.92, 20), (0.92, 0.9, -20)]:
+        ax.text(x, y, "BOOM!", ha="center", va="center", fontsize=13, color="#D7191C", weight="bold", rotation=rot)
+    ax.set_title("the nuclear norm", color=INK)
+
+
+def nuclear_fig(bfile, out, n=5):
+    """imputing the diagonal with the nuclear norm (PCP, centred, scaled GRM)"""
+    ds, _ = F.dataset(bfile, n=n, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    _, C = B.grm(G)
+    N = len(C)
+    Lp, _, _ = I.pcp_kin(C, B.TAU, True, cand=np.zeros((N, N), bool))
+    nn = lambda M: np.abs(np.linalg.eigvalsh(M)).sum()  # noqa: E731
+    ex = [("observed", np.diag(C)), ("half the observed", np.diag(C) / 2), ("zero", np.zeros(N)),
+          ("PCP: the minimum", np.diag(Lp))]
+    off = ~np.eye(N, dtype=bool)
+    vmax = np.percentile(np.abs(C[off]), 99)
+    fig = plt.figure(figsize=(12, 3.6))
+    ax0 = fig.add_axes([0.0, 0.05, 0.22, 0.85])
+    mushroom(ax0)
+    fig.text(0.62, 0.95, r"the same GRM off the diagonal, four diagonals: $\|L\|_* = \sum_k |\lambda_k|$",
+             ha="center", fontsize=11, color=INK)
+    for i, (name, d) in enumerate(ex):
+        ax = fig.add_axes([0.26 + 0.185 * i, 0.16, 0.16, 0.62])
+        M = C.copy()
+        np.fill_diagonal(M, d)
+        ax.imshow(M, cmap="RdBu_r", vmin=-vmax, vmax=vmax, interpolation="nearest")
+        for j, p in enumerate(pop):
+            ax.add_patch(plt.Rectangle((-0.07 * N - 0.5, j - 0.5), 0.05 * N, 1, color=PCOL[p], clip_on=False, lw=0))
+        ax.set_xticks([])
+        ax.set_yticks([])
+        best = i == len(ex) - 1
+        ax.set_title(f"diagonal: {name}", color=INK, fontsize=9, weight="bold" if best else "normal")
+        ax.set_xlabel(f"$\\|L\\|_* = {nn(M):.1f}$", fontsize=12, color="#0072B2" if best else INK)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#0072B2" if best else "#BBBBBB")
+            sp.set_linewidth(2.5 if best else 0.8)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, {name: round(nn(np.where(np.eye(N, dtype=bool), np.diag(d), C)), 2) for name, d in ex})
+
+
+def whitening_fig(bfile, out, n=5):
+    """what whitening does (no relatives): every entry A_ij is divided by
+    sqrt(v_i v_j), so every person's noise on the diagonal becomes 1"""
+    ds, _ = F.dataset(bfile, n=n, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    A, f, w, _ = W.grm_scaled_uncentred(G)
+    N = len(A)
+    L, _, _, _, _ = DL.fit_loc(A, B.TAU, np.zeros((N, N), bool), W.noise_edge(f, w, N), K + 1, 4, kin_check=True)
+    v = np.maximum(np.diag(A) - np.diag(L), 1e-6)
+    Wm = A / np.sqrt(np.outer(v, v))
+    fig = plt.figure(figsize=(12, 3.8))
+    ax0 = fig.add_axes([0.03, 0.12, 0.22, 0.74])
+    ax1 = fig.add_axes([0.36, 0.12, 0.22, 0.74])
+    ax2 = fig.add_axes([0.70, 0.16, 0.29, 0.70])
+    for ax, M, t in [(ax0, A, "GRM $A$"), (ax1, Wm, "whitened: $A_{ij}/\\sqrt{v_i v_j}$")]:
+        ax.imshow(M, cmap="Reds", vmin=M.min(), vmax=M.max(), interpolation="nearest")
+        for i, p in enumerate(pop):
+            ax.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(t, color=INK)
+    F.arrow(fig, ax0, ax1, "divide row $i$ and\ncolumn $i$ by $\\sqrt{v_i}$")
+    x = np.arange(N)
+    ax2.scatter(x, v, s=34, color=[PCOL[p] for p in pop], edgecolor="white", lw=0.4, label="before: $v_i$")
+    ax2.scatter(x, np.ones(N), s=60, marker="_", color=INK, lw=1.8, label="after: $v_i / v_i = 1$")
+    ax2.set_ylim(0, max(1.2, v.max() * 1.15))
+    ax2.set_xticks([])
+    ax2.set_xlabel("individuals (by population)", color=MUTED)
+    ax2.set_ylabel("noise on the diagonal", color=MUTED)
+    ax2.set_title("everyone's noise becomes 1", color=INK)
+    ax2.legend(frameon=False, fontsize=9, loc="lower right")
+    for s in ["top", "right"]:
+        ax2.spines[s].set_visible(False)
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(out, "v range", np.round([v.min(), v.max()], 3))
+
+
+def compare_fig(results, out):
+    """accuracy without relatives (scenario "none", 5 replicates per n, k=3)
+    and run time of the C++ implementations"""
+    import pandas as pd
+    rc = pd.read_csv(os.path.join(results, "restore_centring_test.tsv"), sep="\t")
+    gf = pd.read_csv(os.path.join(results, "grm_fit_bench.tsv"), sep="\t")
+    dl = pd.read_csv(os.path.join(results, "dwg_loc.tsv"), sep="\t")
+    sel = lambda d, m: d[(d.scen == "none") & (d.k == 3) & (d.method == m)]  # noqa: E731
+    acc = [("dwg", sel(dl, "loc4_ea_iter"), "#0072B2", "-"),
+           ("uncentred GRM fit", sel(rc, "restored_fit"), "#56B4E9", "--"),
+           ("detect-white", sel(rc, "detect_white"), "#009E73", "-"),
+           ("aarobust-kin", sel(rc, "aarobust_kin"), "#E69F00", "-"),
+           ("Chen & Storey diagonal", sel(rc, "imp_diagCS"), "#999999", ":"),
+           ("centred GRM, diagonal free", sel(gf, "grm_fit"), "#CC79A7", "-"),
+           ("standard PCA", sel(rc, "standard"), "#D55E00", "-")]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.0))
+    for name, d, c, ls in acc:
+        m = d.groupby("n").minR2.mean()
+        a1.plot(m.index, m.values, ls=ls, color=c, lw=2, marker="o", ms=5, label=name)
+    a1.set_xscale("log")
+    a1.set_xticks([5, 10, 20, 40])
+    a1.set_xticklabels(["5", "10", "20", "40"])
+    a1.minorticks_off()
+    a1.set_ylim(-0.03, 1.05)
+    a1.set_xlabel("individuals per population")
+    a1.set_ylabel("mean min $R^2$ (3 ancestry axes)")
+    a1.set_title("accuracy, no relatives", color=INK)
+    a1.legend(frameon=False, fontsize=8, loc="lower right")
+    # run time, C++ dense engine (results/robust_speed_dense_cpp.txt, dwg_speed_cpp.txt)
+    # and dwg in its default operator engine (methods document)
+    t = {"aarobust-kin": ([500, 1000, 2000], [4.71, 30.71, 247.66], "#E69F00", "-"),
+         "detect-white": ([500, 1000, 2000], [1.48, 3.90, 9.00], "#009E73", "-"),
+         "dwg (dense engine)": ([500, 1000, 2000], [1.79, 4.51, 10.69], "#0072B2", "-"),
+         "dwg (default engine)": ([1000, 5000, 20000], [1.1, 4.7, 26.5], "#0072B2", "--")}
+    for name, (x, y, c, ls) in t.items():
+        a2.plot(x, y, ls=ls, color=c, lw=2, marker="o", ms=5, label=name)
+    a2.set_xscale("log")
+    a2.set_yscale("log")
+    a2.set_xlabel("$N$")
+    a2.set_ylabel("seconds")
+    a2.set_title("run time (PCAone)", color=INK)
+    a2.legend(frameon=False, fontsize=8, loc="upper left")
+    for ax in (a1, a2):
+        for s in ["top", "right"]:
+            ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    for name, d, _, _ in acc:
+        print(name, d.groupby("n").minR2.mean().round(3).to_dict(), "reps", d.groupby("n").size().to_dict())
+
+
+def main():
+    bfile, outdir = sys.argv[1], sys.argv[2]
+    os.makedirs(outdir, exist_ok=True)
+    if len(sys.argv) > 3 and sys.argv[3] == "impute":
+        impute_topr_fig(bfile, os.path.join(outdir, "impute_topr.pdf"))
+        nuclear_fig(bfile, os.path.join(outdir, "impute_nuclear.pdf"))
+        whitening_fig(bfile, os.path.join(outdir, "whitening.pdf"))
+        return
+    if len(sys.argv) > 3:
+        compare_fig(sys.argv[3], os.path.join(outdir, "smalln_compare.pdf"))
+        return
+    ds, T = F.dataset(bfile, n=5, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    T = S.orient_truth(T[o], pop)
+    N = len(G)
+    tau = B.TAU
+    none = np.zeros((N, N), bool)
+
+    # uncentred GRM (SNP-standardised, not centred); L with the diagonal free,
+    # rank stepped up from 1 while the next eigenvalue is above the noise edge
+    A, f, w, _ = W.grm_scaled_uncentred(G)
+    L, Sm, r, pairs, _ = DL.fit_loc(A, tau, none, W.noise_edge(f, w, N), K + 1, 4, kin_check=True)
+    v = np.maximum(np.diag(A) - np.diag(L), 1e-6)
+    off = np.percentile(np.abs((A - A.mean())[~np.eye(N, dtype=bool)]), 99)
+    kw = dict(centre=True)
+    draw(G, pop, T, A, "GRM\n(scaled, uncentred)", kw, imputed(A, L), f"$L$: diag. imputed by\ntop {r - 1} PCs (rank {r})",
+         np.diag(A - L),
+         "$S$: the diagonal", I.cs_pcs(L, K)[1],
+         "uncentred GRM fit: low rank, diagonal free", os.path.join(outdir, "ga_small_fit.pdf"),
+         ["standardise,\nnot centred", "fit\n$A = L + S$", "eigen-\nvectors"])
+    draw(G, pop, T, A, "GRM\n(scaled, uncentred)", kw, imputed(A, L), f"$L$: diag. imputed by\ntop {r - 1} PCs (rank {r})",
+         np.diag(A - L),
+         "$S$: the diagonal", I.whitened_noise(A, v, pairs, K, centre=True),
+         "dwg: uncentred GRM, diagonal free, then whitened and centred",
+         os.path.join(outdir, "ga_small_dwg.pdf"),
+         ["standardise,\nnot centred", "fit\n$A = L + S$", "noise\n$v = S$", "top $k$,\n$\\times\\Sigma^{1/2}$"],
+         sigma=v, raw=A, centre=True, shift=0)
+
+    # aarobust-kin: PCP of the centred, scaled GRM
+    _, C = B.grm(G)
+    Lp, Sp, _ = I.pcp_kin(C, tau, True, cand=none)
+    vmax = np.percentile(np.abs(C[~np.eye(N, dtype=bool)]), 99)
+    # L = C off the diagonal; its diagonal is the one with the smallest sum of
+    # |eigenvalues| (nuclear-norm completion, all eigenvectors); S = the rest
+    draw(G, pop, T, C, "standard GRM\n(centred, scaled)", dict(vmax=vmax), Lp,
+         "$L$: diag. imputed,\nmin $\\sum_k|\\lambda_k|$ (all eigenvectors)", np.diag(C - Lp), "$S$: the diagonal",
+         I.top_eig(Lp, K)[1],
+         "aarobust-kin: robust PCA of the GRM",
+         os.path.join(outdir, "ga_small_aarobust.pdf"),
+         ["centre +\nstandardise", "PCP\n$C = L + S$", "eigen-\nvectors"], shift=0)
+
+    # detect-white: Chen & Storey matrix, diagonal free, whitened
+    H = I.cs_matrix(G)
+    D = (G * (2 - G)).mean(1)
+    L2, S2, _, r2 = I.lr_kin_fd_auto(H, tau, D, I.cs_noise_edge(G), none, rmax=K + 1)
+    pp = I.lr_kin_pairs(H, D, L2, S2)
+    AM = G @ G.T / G.shape[1]
+    v2 = np.diag(AM) - np.diag(L2)
+    draw(G, pop, T, H, "Chen & Storey $H$", dict(centre=True), imputed(H, L2),
+         f"$L$: diag. imputed by\ntop {r2 - 1} PCs (rank {r2})",
+         np.diag(H - L2), "$S$: the diagonal\n(small: $h_i$ already removed)", I.whitened_noise(AM, v2, pp, K),
+         "detect-white: Chen & Storey matrix, diagonal free, then whitened",
+         os.path.join(outdir, "ga_small_dw.pdf"),
+         ["one pass", "fit\n$H = L + S$", "noise from\nthe raw Gram", "eigen-\nvectors,\n$\\times\\Sigma^{1/2}$"],
+         sigma=v2, raw=AM, sigma_title="$\\Sigma$: $v$ = raw diag. $- L$\n($\\approx$ heterozygosity)")
+
+
+if __name__ == "__main__":
+    main()
