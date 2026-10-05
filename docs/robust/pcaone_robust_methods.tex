@@ -576,21 +576,36 @@ kinship and $k_0$.
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\linewidth]{methods/ga_dwg.pdf}
-\caption{Graphical abstract of \texttt{dwg} on the example. The centred GRM
-(what centred data give) is turned back into the uncentred, SNP-standardised
-Gram $A_s$ with the allele frequencies and one number per individual
-($u=X_c\mu/M$). In $C$ the YRI rows are pulled negative by their high
-heterozygosity, spread over the off-diagonal entries by the centring; in $A_s$
-this sits in the mean component instead. The fit chooses rank 4 (three
-ancestry axes plus the mean) and finds the six related pairs, with kinship
-scaled by the fitted noise $v$ rather than heterozygosity. Whitening with the
-family covariance $\Sigma$ gives the PCs. Candidates come from KING and, for
+\caption{Graphical abstract of \texttt{dwg} on the example, as implemented.
+\emph{Top:} the genotypes give the SNP-standardised but uncentred GRM $A$
+(centring would spread each person's heterozygosity over the whole matrix).
+The fit $A=L+S$ chooses rank 4 (three ancestry axes plus the mean) by the
+noise edge; $S$ holds the diagonal and the six related pairs, with kinship
+scaled by the fitted noise $v$; $L=A-S$ has its diagonal and pair entries
+imputed by the top 3 PCs. \emph{Bottom:} $\Sigma$ (noise plus families)
+whitens $A$; the whitened matrix is not centred (all positive), so
+$\Sigma^{-1/2}\mathbf 1$, the mean direction in the whitened space, is
+projected out; the top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$, are
+the PCs, with PC1 the first ancestry axis. Candidates come from KING and, for
 relatives KING misses, from an evalAdmix screen confirmed by $k_0$ (not
-shown). Matrices shown without the diagonal
-(grey) and, for $A_s$, with the overall mean removed; $L$ is double-centred
-for display only.}
+shown). $A$, $L$ and the centred matrix are double-centred for display only.}
 \label{fig:dwg}
 \end{figure}
+
+\paragraph{Final PCs: centred after whitening.} The whitened matrix
+$\Sigma^{-1/2}A\Sigma^{-1/2}$ is built from uncentred genotypes, so its top
+eigenvector is the mean. Instead of dropping that eigenvector, \texttt{dwg}
+centres the whitened matrix by projecting out $u=\Sigma^{-1/2}\mathbf 1/
+\|\Sigma^{-1/2}\mathbf 1\|$: the PCs are the top $k$ eigenvectors of
+$(I-uu')\,\Sigma^{-1/2}A\Sigma^{-1/2}(I-uu')$, mapped back by $\Sigma^{1/2}$.
+Without relatives this is the same as centring every SNP by its mean weighted
+by $1/v_i$. The whitened noise $I$ becomes $I-uu'$, which is still flat, so no
+heterozygosity enters. Centring with the plain mean instead would leave a mean
+remnant along $\Sigma^{-1/2}\mathbf 1-\bar u\mathbf 1$, which follows each
+person's noise, and failed in one of six runs with relatives. Only the final
+step is centred: the detection fit stays uncentred (Section~\ref{sec:smalln},
+the centring trap). On 12 small-$N$ datasets with and without relatives the
+centred PCs gave the same accuracy as dropping the mean eigenvector.
 
 \paragraph{Why the plain GRM fails: centring.} A fixed-rank fit of the
 standardised GRM with the related pairs and the diagonal imputed (the
