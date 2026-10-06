@@ -464,20 +464,21 @@ def run_methods(G, k, tau, ped_pairs, only=None):
         return U, {"pairs": pp}
 
     def lrkin_cs_fd():
-        H = I.cs_matrix(G)
+        # raw Gram with the diagonal free (= the CS matrix off the diagonal)
+        AM = G @ G.T / G.shape[1]
         D = (G * (2 - G)).mean(1)
         cand = king_robust(G) > KING_SCREEN
-        L, S, _ = I.lr_kin_fd(H, k + 1, tau, D, cand)
-        return I.cs_pcs(L, k)[1], {"pairs": I.lr_kin_pairs(H, D, L, S)}
+        L, S, _ = I.lr_kin_fd(AM, k + 1, tau, D, cand)
+        return I.cs_pcs(L, k)[1], {"pairs": I.lr_kin_pairs(AM, D, L, S)}
 
     def hyb_cs_fdA():
-        # detect-white with the detection rank chosen by the noise edge, at most k + 1
-        H = I.cs_matrix(G)
+        # detect-white with the detection rank chosen by the noise edge, at most k + 1;
+        # fit of the raw Gram with the diagonal free (the CS matrix is not needed)
+        AM = G @ G.T / G.shape[1]
         D = (G * (2 - G)).mean(1)
         cand = king_robust(G) > KING_SCREEN
-        L, S, _, r = I.lr_kin_fd_auto(H, tau, D, I.cs_noise_edge(G), cand, rmax=k + 1)
-        pp = I.lr_kin_pairs(H, D, L, S)
-        AM = G @ G.T / G.shape[1]
+        L, S, _, r = I.lr_kin_fd_auto(AM, tau, D, I.cs_noise_edge(G), cand, rmax=k + 1)
+        pp = I.lr_kin_pairs(AM, D, L, S)
         v = np.diag(AM) - np.diag(L)
         return I.whitened_noise(AM, v, pp, k), {"pairs": pp, "K": r}
 

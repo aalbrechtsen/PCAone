@@ -114,9 +114,9 @@ Param::Param(int argc, char** argv) {
   auto robust_opt = opts.add<Implicit<std::string>>("", "robust", "PCA robust to close relatives (2nd degree and closer); --robust alone = auto. Modes are\n"
                                              "auto: dwg; with --impute-diag aarobust-kin;\n"
                                              "aarobust-kin: robust PCA of the GRM, diagonal unobserved, kinship threshold (does not depend on -k);\n"
-                                             "detect-white: detect related pairs on the Chen & Storey matrix (diagonal free), then whitening;\n"
+                                             "detect-white: detect related pairs on the raw Gram matrix (diagonal free), then whitening;\n"
                                              "cswhite: CS whitening with KING (or --kinship) kinship; assumes HWE;\n"
-                                             "frkin: fixed rank + kinship threshold on the Chen & Storey matrix (diagonal free);\n"
+                                             "frkin: fixed rank + kinship threshold on the raw Gram matrix (diagonal free);\n"
                                              "dwg: detect-white on the GRM scale, kinship from the fitted noise (no HWE), family axes and an admixture-aware evalAdmix + k0 screen.", "auto");
   opts.add<Switch>("", "impute-diag", "PCA of the GRM with its diagonal imputed from the off-diagonal entries (small N: the observed\n"
                                        "diagonal reflects heterozygosity, not structure). Alone: standard PCA with the diagonal imputed;\n"

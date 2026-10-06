@@ -210,8 +210,8 @@ MatB kin_select(const Mat2D& R, const Mat1D& v, double tau, const MatB& cand) {
 
 // fixed rank + kinship threshold, rank raised one step at a time (AltProj style)
 // free_diag: the diagonal is imputed from the fit instead of trusting the
-// HWE-based D (robust to inbreeding and genotype errors); off-diagonal entries
-// are still scaled to kinship with D
+// observed one (then any diagonal shift of H, e.g. the CS matrix's -D, does
+// not matter); off-diagonal entries are scaled to kinship with D
 // edge > 0: the rank is raised only while the next eigenvalue of H - S exceeds
 // the noise edge (rank is then the maximum); the rank used is returned in rank
 int lr_kin(const Mat2D& H, int& rank, double tau, const Mat1D& D, const MatB& cand, Mat2D& L, Mat2D& S,
@@ -1282,8 +1282,7 @@ static void run_robust_operator(Data* data, const Param& params) {
               "in", tick.reltime(), "seconds,", nc, "candidate pairs with kinship >", params.king_screen);
   }
   Mat1D D = Dsum / M;
-  Mat1D Hdiag = Adiag / M - D;
-  Mat1D Hc = Ac / M;
+  Mat1D Acm = Ac / M;
   if (!internal_king)
     cao.print(tick.date(), "robust PCA: first pass over", Msites, "sites in", tick.reltime(), "seconds");
 
@@ -1339,12 +1338,13 @@ static void run_robust_operator(Data* data, const Param& params) {
   Mat2D V, Vr, U;
   std::vector<Pair> pairs;
   if (mode == "detect-white" || mode == "frkin") {
-    // fixed rank + kinship with the diagonal free. Each iteration is one pass:
-    // a subspace step on (H - S), then L and S are updated from the Ritz pairs.
+    // fixed rank + kinship on the raw Gram with the diagonal free. Each
+    // iteration is one pass: a subspace step on (A/M - S), then L and S are
+    // updated from the Ritz pairs.
     Mat1D soff = Mat1D::Zero(nc), sdiag = Mat1D::Zero(N), Ldiag, Lc(nc);
     auto op = [&](const Mat2D& X) {
       Mat2D Y = gp.apply(X);
-      Y -= (D + sdiag).asDiagonal() * X;
+      Y -= sdiag.asDiagonal() * X;
       for (Eigen::Index c = 0; c < nc; ++c)
         if (soff(c) != 0) {
           const int i = cand[c].first, j = cand[c].second;
@@ -1370,10 +1370,10 @@ static void run_robust_operator(Data* data, const Param& params) {
           Lc(c) = (Ur.row(cand[c].first).array() * Ur.row(cand[c].second).array() * wr.transpose().array()).sum();
         for (Eigen::Index c = 0; c < nc; ++c) {
           const int i = cand[c].first, j = cand[c].second;
-          const double R = Hc(c) - Lc(c);
+          const double R = Acm(c) - Lc(c);
           soff(c) = R / (2.0 * std::sqrt(std::max(D(i) * D(j), 1e-24))) > tau ? R : 0.0;
         }
-        sdiag = Hdiag - Ldiag;  // diagonal free
+        sdiag = Adiag / M - Ldiag;  // diagonal free
         ++total;
         if (it > 0 && resid < conv_tol) {
           double ch = (Ldiag - Ldiag_old).cwiseAbs().maxCoeff();
@@ -1384,7 +1384,7 @@ static void run_robust_operator(Data* data, const Param& params) {
         Lc_old = Lc;
       }
       if (edge > 0 && r < k + 1) {
-        // the next eigenvalue of H - S at the converged fit
+        // the next eigenvalue of A/M - S at the converged fit
         if (!next_above_edge(op, V, r, edge)) {
           rank = r;
           break;
@@ -1394,7 +1394,7 @@ static void run_robust_operator(Data* data, const Param& params) {
     for (Eigen::Index c = 0; c < nc; ++c)
       if (soff(c) != 0)
         pairs.emplace_back(cand[c].first, cand[c].second,
-                           (Hc(c) - Lc(c)) /
+                           (Acm(c) - Lc(c)) /
                                (2.0 * std::sqrt(std::max(D(cand[c].first) * D(cand[c].second), 1e-24))));
     pass_fit = gp.passes;
     cao.print(tick.date(), "robust PCA: fixed rank + kinship fit, rank", rank, "(at most", k + 1, ", noise edge", edge, "),", total, "iterations,", pass_fit, "passes,", pairs.size(),
@@ -2436,20 +2436,20 @@ void run_robust(Data* data, const Param& params) {
 
   // ---- 3. the chosen method ----------------------------------------------
   Mat2D AM = s.A / M;
-  Mat2D H = AM;
-  H.diagonal() -= D;
   Mat1D w;
   Mat2D U;
   std::vector<Pair> pairs;
   if (mode == "detect-white" || mode == "frkin") {
-    // fixed rank + kinship on the CS matrix with the diagonal free
+    // fixed rank + kinship on the raw Gram with the diagonal free (the CS
+    // matrix A/M - D differs only on the diagonal, which the fit does not use);
+    // D only scales the residual to kinship
     Mat2D L, S;
     int rank = k + 1;
     // detect-white: rank from the noise edge, at most k + 1 (a too large -k is
     // reduced; frkin takes its PCs from L and keeps rank k + 1)
     const double edge = mode == "detect-white" && !params.robust_fixed_rank ? noise_edge(s.edge_sum, M, N) : 0.0;
-    int it = lr_kin(H, rank, tau, D, cand, L, S, true, edge);
-    pairs = lr_kin_pairs(H, D, L, S);
+    int it = lr_kin(AM, rank, tau, D, cand, L, S, true, edge);
+    pairs = lr_kin_pairs(AM, D, L, S);
     cao.print(tick.date(), "robust PCA: fixed rank + kinship fit, rank", rank, "(at most", k + 1, ", noise edge", edge, "),", it, "iterations,", pairs.size(),
               "related pairs detected");
     if (mode == "frkin") {
