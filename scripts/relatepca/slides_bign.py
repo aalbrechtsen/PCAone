@@ -55,6 +55,7 @@ def run_n(bfile, Gall, n):
     base = np.where(~rel)[0]
     U = S.align_signs(U, T, base)
     r2, err = H.score(U, T[:, :3], base, np.where(rel)[0], 3)
+    r2_12 = H.score(U, T[:, :2], base, np.where(rel)[0], 2)[0]  # the PC1/2 plot: true axes 1-2 on PC1-2 only
     # families: each relative with the individuals it is related to (KING > tau)
     king = B.king_robust(G)
     famid = np.zeros(N, int)
@@ -65,23 +66,49 @@ def run_n(bfile, Gall, n):
         famid[mem] = f
         famid[r] = f
     eta = [H.family_eta2(U[:, j], famid) for j in range(K)]
-    return dict(n=n, N=N, U=U, pop=pop, rel=rel, r2=r2, err=err, eta=eta, famid=famid)
+    return dict(n=n, N=N, U=U, pop=pop, rel=rel, r2=r2, r2_12=r2_12, err=err, eta=eta, famid=famid)
 
 
 def figure(res, a, b, out):
     fig, axs = plt.subplots(1, len(res), figsize=(2.7 * len(res), 3.3))
     for ax, d in zip(axs, res):
         s = 30 if d["N"] <= 60 else 14 if d["N"] <= 120 else 8
-        S.scatter(ax, d["U"], d["pop"], d["rel"], f"{d['n']} per population", a=a, b=b)
+        r2 = d["r2_12"] if (a, b) == (0, 1) else d["r2"]
+        S.scatter(ax, d["U"], d["pop"], d["rel"], f"{d['n']} per population ($R^2$ = {r2.min():.2f})", a=a, b=b)
         for c in ax.collections:
             if c.get_paths() and c.get_sizes()[0] < 100:
                 c.set_sizes([s])
         ax.title.set_fontsize(11)
+        ax.set_xlabel(f"PC{a + 1} (family share = {d['eta'][a]:.2f})", color=MUTED, fontsize=9)
+        ax.set_ylabel(f"PC{b + 1} (family share = {d['eta'][b]:.2f})", color=MUTED, fontsize=9)
     hs = [plt.Line2D([], [], marker="o", ls="", color=PCOL[p], markeredgecolor="white", markersize=8) for p in POPS]
     hs.append(plt.Line2D([], [], marker="*", ls="", color="#bbbbbb", markeredgecolor=INK, markersize=12))
     fig.legend(hs, POPS + ["relative"], loc="lower center", ncol=5, frameon=False, bbox_to_anchor=(0.5, -0.06),
                fontsize=10)
     fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+
+def figure_rows(res, pairs, out):
+    """one row per PC pair, one column per N; the N and R2 only above the top row"""
+    fig, axs = plt.subplots(len(pairs), len(res), figsize=(2.7 * len(res), 2.9 * len(pairs) + 0.4))
+    for row, (a, b) in zip(axs, pairs):
+        for ax, d in zip(row, res):
+            s = 30 if d["N"] <= 60 else 14 if d["N"] <= 120 else 8
+            title = f"{d['n']} per population ($R^2$ = {d['r2'].min():.2f})" if (a, b) == pairs[0] else ""
+            S.scatter(ax, d["U"], d["pop"], d["rel"], title, a=a, b=b)
+            for c in ax.collections:
+                if c.get_paths() and c.get_sizes()[0] < 100:
+                    c.set_sizes([s])
+            ax.title.set_fontsize(11)
+            ax.set_xlabel(f"PC{a + 1} (family share = {d['eta'][a]:.2f})", color=MUTED, fontsize=9)
+            ax.set_ylabel(f"PC{b + 1} (family share = {d['eta'][b]:.2f})", color=MUTED, fontsize=9)
+    hs = [plt.Line2D([], [], marker="o", ls="", color=PCOL[p], markeredgecolor="white", markersize=8) for p in POPS]
+    hs.append(plt.Line2D([], [], marker="*", ls="", color="#bbbbbb", markeredgecolor=INK, markersize=12))
+    fig.legend(hs, POPS + ["relative"], loc="lower center", ncol=5, frameon=False, bbox_to_anchor=(0.5, -0.03),
+               fontsize=10)
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
 
@@ -117,11 +144,12 @@ def main():
     _, _, Gall = read_bed(a.bfile)
     res = [run_n(a.bfile, Gall, n) for n in map(int, a.ns.split(","))]
     for d in res:
-        print(f"n={d['n']} N={d['N']} R2 {np.round(d['r2'], 3)} rel err {d['err']:.2f} "
+        print(f"n={d['n']} N={d['N']} R2 {np.round(d['r2'], 3)} R2 PC1-2 {np.round(d['r2_12'], 3)} rel err {d['err']:.2f} "
               f"eta2 PC1-6 {np.round(d['eta'], 2)}")
     os.makedirs(a.outdir, exist_ok=True)
     for x, y in [(0, 1), (1, 2), (2, 3), (3, 4)]:
         figure(res, x, y, os.path.join(a.outdir, f"bign_pc{x + 1}{y + 1}.pdf"))
+    figure_rows(res, [(1, 2), (3, 4)], os.path.join(a.outdir, "bign_pc23_45.pdf"))
     eta_figure(res, os.path.join(a.outdir, "bign_eta.pdf"))
 
 

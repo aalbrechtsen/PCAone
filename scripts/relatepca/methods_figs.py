@@ -56,25 +56,69 @@ def family_pop(ds):
 
 
 def order_rows(pop, n0, K):
-    """rows by population, each relative right after its closest kin"""
+    """rows by population, each relative right after its closest placed kin;
+    a relative with no placed kin starts at the end of its population's block
+    (its own relatives then follow it)"""
     N = len(pop)
-    base = [i for p in POPS for i in range(n0) if pop[i] == p]
-    order = list(base)
-    for r in range(n0, N):
-        kin = int(np.argmax(K[r, :]))
-        pos = order.index(kin) + 1 if kin in order else len(order)
+    order = [i for p in POPS for i in range(n0) if pop[i] == p]
+    left = list(range(n0, N))
+    while left:
+        kin = [max(order, key=lambda j: K[r, j]) for r in left]
+        best = max(range(len(left)), key=lambda a: K[left[a], kin[a]])
+        r = left.pop(best)
+        if K[r, kin[best]] > 0:
+            pos = order.index(kin[best]) + 1
+        else:
+            same = [a for a, j in enumerate(order) if pop[j] == pop[r]]
+            pos = same[-1] + 1 if same else len(order)
         order.insert(pos, r)
     return np.array(order)
 
 
-def heat(ax, M, title, vmax=None, mask_diag=False, sparse=False, cmap="RdBu_r", pop=None, centre=False,
+def order_rows_spread(pop, K):
+    """rows by population, the members of each family spread over their
+    population's block (not next to each other), so a related pair sits away
+    from the diagonal and stands out in S"""
+    N = len(pop)
+    fam = np.arange(N)  # connected components of K > 0
+    for i, j in zip(*np.where(np.triu(K, 1) > 0)):
+        a, b = fam[i], fam[j]
+        fam[fam == b] = a
+    order = []
+    for p in POPS:
+        idx = np.where(pop == p)[0]
+        fams = [idx[fam[idx] == f] for f in dict.fromkeys(fam[idx])]
+        multi = [m for m in fams if len(m) > 1]
+        single = [m[0] for m in fams if len(m) == 1]
+        t = {i: (k + 0.5) / max(len(single), 1) for k, i in enumerate(single)}
+        for f, m in enumerate(multi):  # member j near (j + 0.5) / size, families staggered
+            for j, i in enumerate(m):
+                t[i] = (j + 0.5 + 0.6 * (f + 0.5) / len(multi) - 0.3) / len(m)
+        order += sorted(idx, key=lambda i: t[i])
+    return np.array(order)
+
+
+def heat(ax, M, title, vmax=None, mask_diag=False, sparse=False, cmap="RdBu_r", pop=None, positive=False,
          diag_dots=False):
     M = np.array(M, dtype=float)
     n = len(M)
-    if centre:  # double centring removes the mean component (display only)
-        J = np.eye(n) - 1.0 / n
-        M = J @ M @ J
     off = M[~np.eye(n, dtype=bool)]
+    if positive:  # an uncentred matrix (no negative entries): white -> red from its smallest off-diagonal entry
+        lo, hi = off.min(), np.percentile(off, 99)
+        cm = plt.get_cmap("Reds").copy()
+        cm.set_bad("#d0d0d0")
+        shown = M.copy()
+        if mask_diag:
+            np.fill_diagonal(shown, np.nan)
+        ax.imshow(shown, cmap=cm, vmin=lo, vmax=hi, interpolation="nearest")
+        if pop is not None:
+            for i, p in enumerate(pop):
+                ax.add_patch(plt.Rectangle((-0.06 * n - 0.5, i - 0.5), 0.04 * n, 1, color=PCOL[p], clip_on=False,
+                                           lw=0))
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title, color=INK)
+        return
     if vmax is None:
         vmax = np.abs(off).max() if sparse else np.percentile(np.abs(off), 99)
     cm = plt.get_cmap(cmap).copy()
@@ -177,13 +221,13 @@ def compute(ds):
     _, C = B.grm(G)
     Lc, Sc, _ = I.pcp_kin(C, tau, True, cand=cand)
     out.update(C=C, Lc=Lc, Sc=Sc, U_aar=I.top_eig(Lc, k)[1])
-    # detect-white (noise-edge rank, at most k + 1)
-    L, S, _, r = I.lr_kin_fd_auto(H, tau, D, I.cs_noise_edge(G), cand, rmax=k + 1)
-    pp = I.lr_kin_pairs(H, D, L, S)
+    # detect-white (noise-edge rank, at most k + 1): raw Gram, diagonal free
+    L, S, _, r = I.lr_kin_fd_auto(AM, tau, D, I.cs_noise_edge(G), cand, rmax=k + 1)
+    pp = I.lr_kin_pairs(AM, D, L, S)
     v = np.diag(AM) - np.diag(L)
     out.update(L=L, S=S, rank=r, pairs=pp, noise=v, U_dw=I.whitened_noise(AM, v, pp, k))
     # frkin (fixed rank k + 1)
-    Lf, Sf, _ = I.lr_kin_fd(H, k + 1, tau, D, cand)
+    Lf, Sf, _ = I.lr_kin_fd(AM, k + 1, tau, D, cand)
     out.update(Lf=Lf, Sf=Sf, U_fr=I.cs_pcs(Lf, k)[1])
     # cswhite
     ppk = B.pairs_above(king, tau)
@@ -209,13 +253,13 @@ def fig_aarobust(c, o, pop, rel, out):
     ax = panel_axes(fig, [1.0, 1, 1, 1, 1.05], 0.85)
     geno(ax[0], c["G"][o][:, :160], pop)
     vmax = np.percentile(np.abs(c["C"][~np.eye(len(o), dtype=bool)]), 99)
-    heat(ax[1], P(c["C"]), "GRM $C$\n(centred, scaled)", vmax=vmax, pop=pop)
-    heat(ax[2], P(c["Lc"]), "$L$: diagonal and\npairs imputed", vmax=vmax, pop=pop)
-    heat(ax[3], P(c["Sc"]), "$S$: diagonal\n+ related pairs", sparse=True, pop=pop, diag_dots=True)
+    heat(ax[1], P(c["C"]), "GRM $C$\n(standardized)", vmax=vmax, pop=pop)
+    heat(ax[2], P(c["Sc"]), "$S$: diagonal\n+ related pairs", sparse=True, pop=pop, diag_dots=True)
+    heat(ax[3], P(c["Lc"]), "$L$: diagonal and\npairs imputed", vmax=vmax, pop=pop)
     pcs(ax[4], c["U_aar"][o], pop, rel, "PCs of $L$", 1, 2)
     fig.canvas.draw()
-    arrow(fig, ax[0], ax[1], "standardise")
-    arrow(fig, ax[1], ax[2], "PCP\n$C = L + S$")
+    arrow(fig, ax[0], ax[1], "standardize")
+    arrow(fig, ax[1], ax[2], "PCP\n$C = S + L$")
     plus(fig, ax[2], ax[3])
     arrow(fig, ax[3], ax[4], "eigen-\nvectors")
     fig.text(0.5, 0.96, "aarobust-kin: robust PCA (PCP) of the GRM with a kinship threshold",
@@ -231,10 +275,12 @@ def fig_detect_white(c, o, pop, rel, out):
     fig = plt.figure(figsize=(11.5, 3.0))
     ax = panel_axes(fig, [1.0, 1, 1, 1, 1, 1.05], 0.85)
     geno(ax[0], c["G"][o][:, :160], pop)
-    vmax = np.percentile(np.abs(c["H"][~np.eye(N, dtype=bool)]), 99)
-    heat(ax[1], P(c["H"]), "CS matrix $H$", pop=pop, centre=True)
-    heat(ax[2], P(c["L"]), f"$L$: rank {c['rank']}, diag. free", pop=pop, centre=True)
-    heat(ax[3], P(c["S"]), "$S$: diagonal\n+ pairs $\\hat\\phi>\\tau$", sparse=True, pop=pop, diag_dots=True)
+    # the raw Gram G G'/M: PCAone fits the Chen & Storey matrix H, which differs
+    # from it only on the (free) diagonal, so L is the same and S gains diag(D)
+    heat(ax[1], P(c["AM"]), "raw Gram $GG^\\top/M$", pop=pop, positive=True)
+    heat(ax[2], P(c["L"]), f"$L$: rank {c['rank']}, diag. free", pop=pop, positive=True)
+    heat(ax[3], P(c["S"]), "$S$: diagonal\n+ pairs $\\hat\\phi>\\tau$", sparse=True, pop=pop,
+         diag_dots=True)
     Sig = sigma(c["noise"], c["pairs"], N)
     heat(ax[4], P(Sig), "$\\Sigma$ (families)", sparse=True, pop=pop, diag_dots=True)
     pcs(ax[5], c["U_dw"][o], pop, rel, "PCs (whitened)", 1, 2)
@@ -244,7 +290,7 @@ def fig_detect_white(c, o, pop, rel, out):
     plus(fig, ax[2], ax[3])
     arrow(fig, ax[3], ax[4], "families,\nnoise $v$")
     arrow(fig, ax[4], ax[5], "whiten,\n$\\times\\Sigma^{1/2}$")
-    fig.text(0.5, 0.96, "detect-white: detect related pairs on the CS matrix, then whitening",
+    fig.text(0.5, 0.96, "detect-white: detect related pairs on the raw Gram, then whitening",
              ha="center", fontsize=11, color=INK, weight="bold")
     legend_row(fig)
     fig.savefig(out, bbox_inches="tight")
@@ -287,17 +333,16 @@ def fig_frkin(c, o, pop, rel, out):
     fig = plt.figure(figsize=(10, 3.0))
     ax = panel_axes(fig, [1.0, 1, 1, 1, 1.05], 0.85)
     geno(ax[0], c["G"][o][:, :160], pop)
-    vmax = np.percentile(np.abs(c["H"][~np.eye(N, dtype=bool)]), 99)
-    heat(ax[1], P(c["H"]), "CS matrix $H$", pop=pop, centre=True)
-    heat(ax[2], P(c["Lf"]), "$L$: rank $k+1$, diag. free", pop=pop, centre=True)
-    heat(ax[3], P(c["Sf"]), "$S$: diagonal\n+ related pairs", sparse=True, pop=pop, diag_dots=True)
+    heat(ax[1], P(c["AM"]), "raw Gram $GG^\\top/M$", pop=pop, positive=True)
+    heat(ax[2], P(c["Sf"]), "$S$: diagonal\n+ related pairs", sparse=True, pop=pop, diag_dots=True)
+    heat(ax[3], P(c["Lf"]), "$L$: rank $k+1$, diag. free", pop=pop, positive=True)
     pcs(ax[4], c["U_fr"][o], pop, rel, "PCs of $L$", 1, 2)
     fig.canvas.draw()
     arrow(fig, ax[0], ax[1], "one pass")
     arrow(fig, ax[1], ax[2], "fixed rank\n+ kinship")
     plus(fig, ax[2], ax[3])
     arrow(fig, ax[3], ax[4], "eigen-\nvectors")
-    fig.text(0.5, 0.96, "frkin: fixed rank + kinship threshold on the CS matrix", ha="center", fontsize=10,
+    fig.text(0.5, 0.96, "frkin: fixed rank + kinship threshold on the raw Gram", ha="center", fontsize=10,
              color=INK, weight="bold")
     legend_row(fig)
     fig.savefig(out, bbox_inches="tight")
@@ -369,7 +414,7 @@ def fig_engines(out):
     link(ax, (0.2, 0.375), (0.2, 0.325))
     link(ax, (0.2, 0.235), (0.2, 0.175))
     box(ax, 0.73, 0.42, 0.42, 0.09, "pass 1: $D_i$, diag($GG'$), noise edge, bit-packed genotypes [+ count sketch]\n"
-        "KING-robust over all pairs (N $\\leq$ 20,000) or on sketch neighbours (N > 20,000)\n"
+        "KING-robust over all pairs (N $\\leq$ 20,000) or on sketch neighbors (N > 20,000)\n"
         "->  candidate pairs > 0.04   [or --kinship: predetermined pairs, no search]")
     box(ax, 0.73, 0.28, 0.42, 0.09, "fit: each iteration = one pass  $Z = G\\,W^{-1}(G'V)$ (dwg)  (SNPs over threads)\n"
         "Rayleigh-Ritz on (A - S), update L and S on the candidates; family axes;\n"
@@ -556,7 +601,8 @@ def main():
     rel = np.arange(N) >= n0
     o = order_rows(pop, n0, ds["Kped"] + np.eye(N) * 0)
     po, ro = pop[o], rel[o]
-    fig_aarobust(c, o, po, ro, os.path.join(a.out, "ga_aarobust.pdf"))
+    o2 = order_rows_spread(pop, ds["Kped"])  # related pairs off the diagonal, visible in S
+    fig_aarobust(c, o2, pop[o2], rel[o2], os.path.join(a.out, "ga_aarobust.pdf"))
     fig_detect_white(c, o, po, ro, os.path.join(a.out, "ga_detect_white.pdf"))
     fig_cswhite(c, o, po, ro, os.path.join(a.out, "ga_cswhite.pdf"))
     fig_frkin(c, o, po, ro, os.path.join(a.out, "ga_frkin.pdf"))

@@ -62,7 +62,7 @@ def main(bfile, out):
     n0 = ds["n0"]
     pop = F.family_pop(ds)
     rel = np.arange(N) >= n0
-    o = F.order_rows(pop, n0, ds["Kped"])
+    o = F.order_rows_spread(pop, ds["Kped"])  # related pairs off the diagonal, visible in S
     P = lambda M: M[np.ix_(o, o)]  # noqa: E731
     po, ro = pop[o], rel[o]
     king = B.king_robust(G)
@@ -81,22 +81,22 @@ def main(bfile, out):
     top = F.panel_axes(fig, [1.0, 1, 1, 1], 0.85, bottom=0.56, height=0.31)
     bot = F.panel_axes(fig, [1, 1, 1, 1.05], 0.85, bottom=0.10, height=0.29)
     F.geno(top[0], G[o][:, :160], po)
-    F.heat(top[1], P(A), "GRM $A$\n(scaled, not centred)", pop=po, centre=True)
-    F.heat(top[2], P(Limp), f"$L$: diag. + pairs imputed\nby top {r - 1} PCs (rank {r})", pop=po, centre=True)
+    F.heat(top[1], P(A), "uncentered GRM $A$\n(scaled)", pop=po, positive=True)
+    F.heat(top[2], P(Limp), f"$L$: diag. + pairs imputed\nby top {r - 1} PCs (rank {r})", pop=po, positive=True)
     F.heat(top[3], P(S), "$S$: diagonal + pairs\n$\\hat\\phi>\\tau$ (scaled by $v$)", sparse=True, pop=po,
            diag_dots=True)
-    F.heat(bot[0], P(Sig), "$\\Sigma$: noise $v$\n+ families", sparse=True, pop=po, diag_dots=True)
+    F.heat(bot[0], P(Sig), "$\\Sigma = S$\n(diagonal + pairs)", sparse=True, pop=po, diag_dots=True)
     Mwo = P(Mw)
     bot[1].imshow(Mwo, cmap="Reds", vmin=Mwo.min(), vmax=np.percentile(Mwo, 99), interpolation="nearest")
     for i, p in enumerate(po):
         bot[1].add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=F.PCOL[p], clip_on=False, lw=0))
     bot[1].set_xticks([])
     bot[1].set_yticks([])
-    bot[1].set_title("whitened $\\Sigma^{-1/2}A\\,\\Sigma^{-1/2}$\n(not centred: all positive)", color=INK)
-    F.heat(bot[2], P(Mc), "centred: $\\Sigma^{-1/2}\\mathbf{1}$\nprojected out", pop=po)
+    bot[1].set_title("whitened $\\Sigma^{-1/2}A\\,\\Sigma^{-1/2}$\n(not centered: all positive)", color=INK)
+    F.heat(bot[2], P(Mc), "centered: $\\Sigma^{-1/2}\\mathbf{1}$\nprojected out", pop=po)
     F.pcs(bot[3], U[o], po, ro, f"PCs: PC2 vs PC3\nMXL axis $R^2$ = {r2[2]:.2f}", 1, 2)
     fig.canvas.draw()
-    F.arrow(fig, top[0], top[1], "standardise,\nnot centred")
+    F.arrow(fig, top[0], top[1], "scale,\nnot centered")
     F.arrow(fig, top[1], top[2], "fit\n$A = L + S$")
     F.plus(fig, top[2], top[3])
     # elbow from S down to Sigma
@@ -105,12 +105,12 @@ def main(bfile, out):
     fig.add_artist(plt.Line2D([xs, xs, xb], [b3.y0 - 0.01, ym, ym], transform=fig.transFigure, color=MUTED, lw=1.0))
     fig.add_artist(FancyArrowPatch((xb, ym), (xb, b4.y1 + 0.085), transform=fig.transFigure, arrowstyle="-|>",
                                    mutation_scale=10, color=MUTED, lw=1.0))
-    fig.text((xs + xb) / 2, ym + 0.008, "noise $v$ = diagonal of $S$; families from the pairs", ha="center",
+    fig.text((xs + xb) / 2, ym + 0.008, "$\\Sigma = S$: whiten with the fitted noise and families", ha="center",
              va="bottom", fontsize=8, color=MUTED)
     F.arrow(fig, bot[0], bot[1], "whiten")
-    F.arrow(fig, bot[1], bot[2], "centre")
+    F.arrow(fig, bot[1], bot[2], "center")
     F.arrow(fig, bot[2], bot[3], "top $k$,\n$\\times\\Sigma^{1/2}$")
-    fig.text(0.5, 0.965, "dwg: detect related pairs on the GRM, then whiten and centre", ha="center", fontsize=11,
+    fig.text(0.5, 0.965, "detect-white-GRM (dwg): detect related pairs on the uncentered GRM, then whiten and center", ha="center", fontsize=11,
              color=INK, weight="bold")
     F.legend_row(fig, 0.0)
     fig.savefig(out, bbox_inches="tight")

@@ -59,8 +59,20 @@ def one(job):
     G = ds["G"].astype(float)
     N = len(G)
     rel = np.arange(ds["n0"], N)
-    off = ~np.eye(N, dtype=bool)
     true = {(int(i), int(j)) for i, j in zip(*np.where(np.triu(ds["Kped"] >= B.TAU, 1)))}
+    out = run_methods(G)
+    rows = []
+    for m, (Um, det) in out.items():
+        r2, err = B.score(Um, T, ds["n0"], rel, 3)
+        rec = len(det & true) / len(true) if true else np.nan
+        rows.append((group, n, scen, rep, m, r2.min(), err, rec, len(det - true), len(true)))
+    return rows
+
+
+def run_methods(G):
+    """{method: (top K ancestry PCs, detected pairs)} for a genotype matrix"""
+    N = len(G)
+    off = ~np.eye(N, dtype=bool)
     cand = (B.king_robust(G) > B.KING_SCREEN) & off
     out = {}
     # standard PCA
@@ -86,12 +98,7 @@ def one(job):
     # dwg
     U, pd_, _ = DL.dwg_loc_ea(G, K, cand, 4, kin_check=True, k0_max=0.8)
     out["dwg"] = (U, {(min(i, j), max(i, j)) for i, j, _ in pd_})
-    rows = []
-    for m, (Um, det) in out.items():
-        r2, err = B.score(Um, T, ds["n0"], rel, 3)
-        rec = len(det & true) / len(true) if true else np.nan
-        rows.append((group, n, scen, rep, m, r2.min(), err, rec, len(det - true), len(true)))
-    return rows
+    return out
 
 
 if __name__ == "__main__":

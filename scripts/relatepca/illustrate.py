@@ -195,7 +195,7 @@ def kin_select(R, noise, tau):
     return sel
 
 
-def pcp_kin(M, tau, free_diag, D=None, tol=1e-7, maxit=1000, cand=None):
+def pcp_kin(M, tau, free_diag, D=None, tol=1e-7, maxit=1000, cand=None, force=None):
     """PCP (inexact ALM) where the sparse step is a kinship threshold instead of
     an l1 shrinkage: S_ij = residual if its kinship > tau, else 0 (no lambda).
 
@@ -221,6 +221,8 @@ def pcp_kin(M, tau, free_diag, D=None, tol=1e-7, maxit=1000, cand=None):
         sel = kin_select(B, noise, tau)
         if cand is not None:  # only screened candidate pairs may enter S
             sel &= cand
+        if force is not None:  # pairs always in S (imputed whatever their kinship)
+            sel |= force
         S = np.where(sel, B, 0)
         if free_diag:
             S[eye] = (M - L)[eye]

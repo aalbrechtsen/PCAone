@@ -114,7 +114,7 @@ def fig_small(c, o, pop, rel, rp, out):
     ax = grid2(fig)
     vmax = np.percentile(np.abs(c["C"][~np.eye(len(o), dtype=bool)]), 99)
     F.heat(ax[0], P(c["C"]), "", vmax=vmax, mask_diag=True, pop=pop)
-    step(ax[0], 1, "one pass: GRM $C$\n    diagonal unobserved (grey)")
+    step(ax[0], 1, "one pass: GRM $C$\n    diagonal unobserved (gray)")
     Kc = np.where(c["cand"], c["king"], 0)
     np.fill_diagonal(Kc, 0)
     F.heat(ax[1], P(Kc), "", sparse=True, pop=pop)
@@ -300,7 +300,7 @@ def fig_verylarge(sk, Nsk, timing, out):
         "",
         "exact KING-robust on",
         "~3.5 candidates / person"])
-    step(ax[2], 3, "nearest neighbours")
+    step(ax[2], 3, "nearest neighbors")
     # 4. recall
     a = ax[3]
     names = ["MZ", "1st", "2nd", "3rd"]

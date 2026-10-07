@@ -167,7 +167,7 @@ def cs_fig(bfile, out, n=5, scen="none"):
         axh.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
     axh.set_xticks([])
     axh.set_yticks([])
-    axh.set_title("CS covariance $H$\n(not centred: all positive)", color=INK)
+    axh.set_title("CS covariance $H$\n(not centered: all positive)", color=INK)
     ax0.bar(np.arange(N), V[:, 0], color=[PCOL[p] for p in pop], width=0.8)
     ax0.axhline(1 / np.sqrt(N), color=MUTED, lw=0.8, ls=":")
     ax0.text(-0.5, 1.2 / np.sqrt(N), r"dotted: $1/\sqrt{N}$, the same for everyone", ha="left", va="top",
@@ -190,46 +190,32 @@ def cs_fig(bfile, out, n=5, scen="none"):
     print(out, "R2 from PC2-4", np.round(r2, 3), "PC1 range", np.round([V[:, 0].min(), V[:, 0].max()], 3))
 
 
-def ls_fig(bfile, out, n=5, scen="none", r=4, iters=500):
-    """small N as L + S: the uncentred SNP-standardised Gram A = G W^-1 G'/M
-    split into a rank-r part L (mean + ancestry; diagonal imputed from L
-    itself) and S = diag(A - L), the heterozygosity noise"""
+def ls_fig(bfile, out, n=5, scen="none"):
+    """small N as L + S on the GRM C (standardized: centered and scaled): L is
+    C with its diagonal imputed by PCP (smallest nuclear norm; it works on a
+    centered matrix), S = diag(C - L), the heterozygosity noise. C = L + S exactly"""
+    import benchmark as B
+    import illustrate as I
     ds, _ = F.dataset(bfile, n=n, scen=scen)
     G = ds["G"].astype(float)
     pop = F.family_pop(ds)
     o = np.argsort([POPS.index(p) for p in pop], kind="stable")
     G, pop = G[o], pop[o]
-    f = G.mean(0) / 2
-    ok = (f > 0) & (f < 1)
-    X = G[:, ok] / np.sqrt(2 * f[ok] * (1 - f[ok]))
-    A = X @ X.T / ok.sum()
-    N = len(A)
-    At = A.copy()
-    off = ~np.eye(N, dtype=bool)
-    # start from the off-diagonal row means: from the observed diagonal the
-    # rank-4 fit gets stuck on one YRI individual's heterozygosity
-    d = np.array([A[i, off[i]].mean() for i in range(N)])
-    for _ in range(iters):
-        np.fill_diagonal(At, d)
-        w, V = np.linalg.eigh(At)
-        L = (V[:, -r:] * w[-r:]) @ V[:, -r:].T
-        if np.max(np.abs(np.diag(L) - d)) < 1e-10:
-            break
-        d = np.diag(L).copy()
-    S = np.diag(np.diag(A - L))
-    # L as eigendecomposed: the GRM with its diagonal imputed by the rank-r fit (A = L + S exactly)
-    L = A.copy()
-    np.fill_diagonal(L, np.diag(A - S))
-    lo, hi = min(A.min(), L.min()), A.max()
+    _, C = B.grm(G)
+    N = len(C)
+    L, _, _ = I.pcp_kin(C, B.TAU, True, cand=np.zeros((N, N), bool))
+    S = np.diag(np.diag(C - L))
+    vmax = np.abs(L).max()  # the structure's scale: C's diagonal saturates (it is mostly noise)
     fig = plt.figure(figsize=(12, 4.0))
     axs = [fig.add_axes([0.03 + 0.335 * i, 0.08, 0.26, 0.78]) for i in range(3)]
     shown = S.copy()
     shown[~np.eye(N, dtype=bool)] = np.nan
-    cm = plt.get_cmap("Reds").copy()
+    cm = plt.get_cmap("RdBu_r").copy()
     cm.set_bad("white")
-    for ax, M, t in zip(axs, [A, L, shown], ["GRM (scaled, uncentred)", f"$L$: diag. imputed by top {r - 1} PCs (rank {r})",
-                                             "$S$: diagonal only (heterozygosity)"]):
-        ax.imshow(M, cmap=cm, vmin=lo, vmax=hi, interpolation="nearest")
+    for ax, M, t, vm in zip(axs, [C, L, shown], ["GRM $C$ (standardized)", "$L$: diagonal imputed",
+                                                 "$S$: diagonal only (heterozygosity)"],
+                            [vmax, vmax, np.nanmax(np.abs(shown))]):
+        ax.imshow(M, cmap=cm, vmin=-vm, vmax=vm, interpolation="nearest")
         for i, p in enumerate(pop):
             ax.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False, lw=0))
         ax.set_xticks([])
@@ -242,8 +228,8 @@ def ls_fig(bfile, out, n=5, scen="none", r=4, iters=500):
         fig.text((b1.x1 + b2.x0) / 2, (b1.y0 + b1.y1) / 2, sym, ha="center", va="center", fontsize=26, color=INK)
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
-    print(out, "mean diag A", round(np.diag(A).mean(), 3), "L", round(np.diag(L).mean(), 3),
-          "S", round(np.diag(S).mean(), 3), "mean off A", round(A[~np.eye(N, dtype=bool)].mean(), 3))
+    print(out, "mean diag C", round(np.diag(C).mean(), 3), "L", round(np.diag(L).mean(), 3),
+          "S", round(np.diag(S).mean(), 3), "max |C - L - S|", np.abs(C - L - S).max())
 
 
 def grm_diag(bfile, out, n=5, scen="none"):
@@ -316,7 +302,7 @@ def pca_intro(bfile, out, n=10, nsnp=150):
     ax0.set_ylabel("individuals", color=MUTED, labelpad=12)
     F.heat(ax1, C, "covariance between individuals (GRM)", pop=pop)
     scatter(ax2, U, pop, np.zeros(len(pop), bool), "PCs: top eigenvectors", a=0, b=1)
-    for a, b, t, pad in [(ax0, ax1, "standardise,\n$XX^\\top/M$", 0), (ax1, ax2, "eigen-\ndecomposition", 0.025)]:
+    for a, b, t, pad in [(ax0, ax1, "standardize,\n$XX^\\top/M$", 0), (ax1, ax2, "eigen-\ndecomposition", 0.025)]:
         F.arrow(fig, a, b, t)
         if pad:  # keep the arrow off the PC2 label
             p = fig.patches[-1] if fig.patches else fig.artists[-1]
@@ -329,6 +315,89 @@ def pca_intro(bfile, out, n=10, nsnp=150):
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(out, "N", len(G), "M", G.shape[1])
+
+
+def pca_predict(bfile, outdir, n=5, rs=(2, 4, 6, 8), centred=True):
+    """one figure per r: the uncentred GRM A, its prediction from the top r
+    PCs (sum of lambda_k v_k v_k^T) and PC1/2 .. PC7/8, the PCs used in
+    colour; the sample of the imputation slides. Two versions: the diagonal
+    used (pca_predict_r*), and the diagonal missing (pca_predict_nodiag_r*:
+    imputed iteratively from the same top r PCs, diag_imputed).
+    centred: the GRM C (blue-white-red) instead of A (files pca_predict_A_*)"""
+    import benchmark as B
+    import dw_grm as W
+    ds, T = F.dataset(bfile, n=n, scen="none")
+    G = ds["G"].astype(float)
+    pop = F.family_pop(ds)
+    o = np.argsort([POPS.index(p) for p in pop], kind="stable")
+    G, pop = G[o], pop[o]
+    A = B.grm(G)[1] if centred else W.grm_scaled_uncentred(G)[0]
+    N = len(A)
+    off = ~np.eye(N, dtype=bool)
+    if centred:  # one scale for every matrix
+        hi = np.percentile(np.abs(A[off]), 99)
+        lo, cm = -hi, plt.get_cmap("RdBu_r").copy()
+    else:
+        lo, hi = A[off].min(), np.percentile(A[off], 99)
+        cm = plt.get_cmap("Reds").copy()
+    cm.set_bad("#d0d0d0")
+
+    def mat(ax, M, title, nodiag=False):
+        M = M.copy()
+        if nodiag:
+            np.fill_diagonal(M, np.nan)
+        ax.imshow(M, cmap=cm, vmin=lo, vmax=hi, interpolation="nearest")
+        if nodiag:
+            for i in range(N):
+                ax.text(i, i, "?", ha="center", va="center", fontsize=6, color=INK)
+        for i, p in enumerate(pop):
+            ax.add_patch(plt.Rectangle((-0.06 * N - 0.5, i - 0.5), 0.04 * N, 1, color=PCOL[p], clip_on=False,
+                                       lw=0))
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title, color=INK)
+
+    for nodiag in (False, True):
+        for r in rs:
+            M = diag_imputed(A, r) if nodiag else A
+            w, V = np.linalg.eigh(M)
+            w, V = w[::-1], V[:, ::-1]
+            if centred:
+                V = align_signs(V, T[o], np.arange(N))
+            else:
+                V = V * np.sign(V.sum(0) + 1e-12)  # PC1 (the mean) positive
+                V[:, 1:] = align_signs(V[:, 1:], T[o], np.arange(N))
+            P = (V[:, :r] * w[:r]) @ V[:, :r].T
+            fig = plt.figure(figsize=(12, 4.2))
+            ax0 = fig.add_axes([0.02, 0.10, 0.26, 0.74])
+            ax1 = fig.add_axes([0.34, 0.10, 0.26, 0.74])
+            mat(ax0, A, ("GRM $C$" if centred else "uncentered GRM $A$") + (": diagonal missing" if nodiag else ""), nodiag)
+            mat(ax1, P, f"predicted from the top {r} PCs")
+            for k in range(4):
+                a, b = 2 * k, 2 * k + 1
+                ax = fig.add_axes([0.67 + (k % 2) * 0.17, 0.50 - (k // 2) * 0.43, 0.13, 0.34])
+                if a < r:  # PC a used (PC b too, unless r is odd)
+                    scatter(ax, V, pop, np.zeros(N, bool), "", a=a, b=b)
+                else:  # not used yet: gray
+                    U = V / np.abs(V).max(0)
+                    ax.scatter(U[:, a], U[:, b], s=34, color="#d9d9d9", edgecolor="white", linewidth=0.5)
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    ax.set_xlabel(f"PC{a + 1}", color="#bbbbbb")
+                    ax.set_ylabel(f"PC{b + 1}", color="#bbbbbb")
+                    for s_ in ax.spines.values():
+                        s_.set_edgecolor("#d9d9d9")
+                ax.xaxis.labelpad = 1
+                ax.yaxis.labelpad = 1
+            hs = [plt.Line2D([], [], marker="o", ls="", color=PCOL[p], markeredgecolor="white", markersize=8)
+                  for p in POPS]
+            fig.legend(hs, POPS, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, -0.07),
+                       fontsize=10)
+            out = os.path.join(outdir, f"pca_predict_{'' if centred else 'A_'}{'nodiag_' if nodiag else ''}r{r}.pdf")
+            fig.savefig(out, bbox_inches="tight")
+            plt.close(fig)
+            r2 = 1 - ((A - P)[off] ** 2).sum() / ((A[off] - A[off].mean()) ** 2).sum()
+            print(out, "N", N, "off-diag R2", round(r2, 3))
 
 
 def pca_resid(bfile, out, n=5):
@@ -382,9 +451,28 @@ def pca_resid(bfile, out, n=5):
           "YRI share of PC3", round((V[pop == "YRI", 2] ** 2).sum(), 3))
 
 
-def pca_resid_rel(bfile, out, n=10, scen="many"):
+def diag_imputed(A, r=4, iters=1000):
+    """the uncentred GRM with its diagonal imputed by a rank-r fit (as ls_fig)"""
+    N = len(A)
+    off = ~np.eye(N, dtype=bool)
+    d = np.array([A[i, off[i]].mean() for i in range(N)])
+    At = A.copy()
+    for _ in range(iters):
+        np.fill_diagonal(At, d)
+        w, V = np.linalg.eigh(At)
+        L = (V[:, -r:] * w[-r:]) @ V[:, -r:].T
+        if np.max(np.abs(np.diag(L) - d)) < 1e-10:
+            break
+        d = np.diag(L).copy()
+    np.fill_diagonal(At, d)
+    return At
+
+
+def pca_resid_rel(bfile, out, n=10, scen="many", fixed=False):
     """what the top two PCs leave unexplained with relatives (the first hook):
-    off the diagonal the related pairs stand out, and PC3 follows them"""
+    off the diagonal the related pairs stand out, and PC3 follows them.
+    fixed: the same on the uncentred GRM with its diagonal imputed (the
+    small-N fix), with the mean dropped: PC3+1 still follows the relatives"""
     import benchmark as B
     ds, T = F.dataset(bfile, n=n, scen=scen)
     G = ds["G"].astype(float)
@@ -392,16 +480,21 @@ def pca_resid_rel(bfile, out, n=10, scen="many"):
     N = len(G)
     rel = np.arange(N) >= ds["n0"]
     T = orient_truth(T, pop)
-    _, C = B.grm(G)
+    if fixed:
+        f = G.mean(0) / 2
+        ok = (f > 0) & (f < 1)
+        X = G[:, ok] / np.sqrt(2 * f[ok] * (1 - f[ok]))
+        C = diag_imputed(X @ X.T / ok.sum())
+    else:
+        _, C = B.grm(G)
+    m = int(fixed)  # the uncentred GRM's PC1 is the mean
     king = B.king_robust(G)
-    kz = king.copy()
-    kz[:, ds["n0"]:] = -np.inf  # each relative goes next to its closest unrelated kin
-    o = F.order_rows(pop, ds["n0"], kz)
+    o = F.order_rows(pop, ds["n0"], ds["Kped"])
     G, pop, rel, C, king, T = G[o], pop[o], rel[o], C[np.ix_(o, o)], king[np.ix_(o, o)], T[o]
     w, V = np.linalg.eigh(C)
     w, V = w[::-1], V[:, ::-1]
-    V = align_signs(V, T, np.where(~rel)[0])
-    R = C - (V[:, :2] * w[:2]) @ V[:, :2].T
+    V = np.hstack([V[:, :m], align_signs(V[:, m:], T, np.where(~rel)[0])])
+    R = C - (V[:, :2 + m] * w[:2 + m]) @ V[:, :2 + m].T
     off = ~np.eye(N, dtype=bool)
     relp = (king > B.TAU) & off
     fig = plt.figure(figsize=(12, 4.0))
@@ -420,7 +513,8 @@ def pca_resid_rel(bfile, out, n=10, scen="many"):
             ax0.plot(-0.04 * N - 0.5, i, marker="*", ms=7, color=PCOL[p], mec=INK, mew=0.4, clip_on=False)
     ax0.set_xticks([])
     ax0.set_yticks([])
-    ax0.set_title("GRM minus top 2 PCs\n(diagonal hidden)", color=INK)
+    ax0.set_title("GRM, diagonal imputed,\nminus mean and top 2 PCs" if fixed else "GRM minus top 2 PCs\n(diagonal hidden)",
+                  color=INK)
     iu = np.triu_indices(N, 1)
     vals, isrel = R[iu], relp[iu]
     bins = np.linspace(vals.min(), vals.max(), 50)
@@ -435,7 +529,11 @@ def pca_resid_rel(bfile, out, n=10, scen="many"):
     ax1.legend(frameon=False, fontsize=9, loc="upper right")
     for s in ["top", "right"]:
         ax1.spines[s].set_visible(False)
-    scatter(ax2, V[:, :3], pop, rel, "so PC3 follows the relatives", a=1, b=2)
+    scatter(ax2, V[:, m:3 + m], pop, rel, "so PC3+1 follows the relatives" if fixed else "so PC3 follows the relatives",
+            a=1, b=2)
+    if fixed:
+        ax2.set_xlabel("PC2+1", color=MUTED)
+        ax2.set_ylabel("PC3+1", color=MUTED)
     F.arrow(fig, ax1, ax2, "next\neigenvector")
     p = fig.patches[-1] if fig.patches else fig.artists[-1]
     (x0, y), (x1, _) = p._posA_posB
@@ -448,7 +546,7 @@ def pca_resid_rel(bfile, out, n=10, scen="many"):
     inv = relp.any(1)
     print(out, "related pairs", relp.sum() // 2, "share of resid SS: diag", round((np.diag(R) ** 2).sum() / (R ** 2).sum(), 3),
           "related", round((R[relp] ** 2).sum() / (R ** 2).sum(), 3), "PC3 weight on pair members",
-          round((V[inv, 2] ** 2).sum(), 3), "of", inv.sum())
+          round((V[inv, 2 + m] ** 2).sum(), 3), "of", inv.sum())
 
 
 if __name__ == "__main__":
@@ -469,7 +567,15 @@ if __name__ == "__main__":
         grm_diag(bfile, os.path.join(outdir, "smalln_grm.pdf"))
     if "intro" in which:
         pca_intro(bfile, os.path.join(outdir, "pca_intro.pdf"))
+    if "predict" in which:
+        pca_predict(bfile, outdir)
+    if "predict3" in which:  # r = 3: the number of ancestry axes in C
+        pca_predict(bfile, outdir, rs=(3,))
+    if "predict_A" in which:
+        pca_predict(bfile, outdir, centred=False)
     if "resid" in which:
         pca_resid(bfile, os.path.join(outdir, "pca_resid.pdf"))
     if "resid_rel" in which:
         pca_resid_rel(bfile, os.path.join(outdir, "pca_resid_rel.pdf"))
+    if "resid_rel_fixed" in which:
+        pca_resid_rel(bfile, os.path.join(outdir, "pca_resid_rel_fixed.pdf"), fixed=True)
