@@ -40,10 +40,13 @@ EXPECT = {"MZ": (0.0, 0.0, 1.0), "parent-offspring": (0.0, 1.0, 0.0), "full sibs
 class Pedigree:
     """genotypes and pedigree kinship of the individuals made so far"""
 
-    def __init__(self, G, anc, drop, rng):
+    def __init__(self, G, anc, drop, rng, track=False):
         self.G, self.anc, self.drop, self.rng = G, anc, drop, rng
         self.haps, self.parents, self.kind, self.ancs = [], [], [], []
         self.K = {}  # (a, b) -> kinship for a < b, plus (a, a) -> self-kinship
+        # track: founder-haplotype labels (2x, 2x + 1 for founder x) carried through the same
+        # crossovers, for the realized IBD of any pair
+        self.track, self.labs = track, []
 
     def kin(self, a, b):
         if a == b:
@@ -53,6 +56,9 @@ class Pedigree:
     def founder(self, gi):
         x = len(self.haps)
         self.haps.append(self.drop.phase(self.G[gi]))
+        if self.track:
+            m = self.G.shape[1]
+            self.labs.append(np.stack([np.full(m, 2 * x, np.int16), np.full(m, 2 * x + 1, np.int16)]))
         self.parents.append(None)
         self.kind.append("founder")
         self.ancs.append(self.anc[gi])
@@ -61,7 +67,13 @@ class Pedigree:
 
     def child(self, f, m):
         x = len(self.haps)
-        self.haps.append(np.stack([self.drop.gamete(self.haps[f]), self.drop.gamete(self.haps[m])]))
+        if self.track:
+            hf, lf = self.drop.gamete(self.haps[f], self.labs[f])
+            hm, lm = self.drop.gamete(self.haps[m], self.labs[m])
+            self.haps.append(np.stack([hf, hm]))
+            self.labs.append(np.stack([lf, lm]))
+        else:
+            self.haps.append(np.stack([self.drop.gamete(self.haps[f]), self.drop.gamete(self.haps[m])]))
         self.parents.append((f, m))
         self.kind.append("child")
         self.ancs.append(f"{self.ancs[f]}x{self.ancs[m]}" if self.ancs[f] != self.ancs[m] else self.ancs[f])
@@ -75,6 +87,8 @@ class Pedigree:
     def copy(self, src):
         x = len(self.haps)
         self.haps.append(self.haps[src])
+        if self.track:
+            self.labs.append(self.labs[src])
         self.parents.append(("=", src))
         self.kind.append("mz")
         self.ancs.append(self.ancs[src])
@@ -86,10 +100,12 @@ class Pedigree:
         return x
 
 
-def simulate(G, anc, bim, n_target, rel_frac, seed):
+def simulate(G, anc, bim, n_target, rel_frac, seed, track=False):
+    """track: also return the founder-haplotype labels (2 x M, int16) of every individual in the
+    data, for the realized IBD of a pair (realized_ibd); the draws and the data are the same"""
     rng = np.random.default_rng(seed)
     drop = Dropper(bim, rng)
-    P = Pedigree(G, anc, drop, rng)
+    P = Pedigree(G, anc, drop, rng, track)
     pool = {a: list(rng.permutation(np.where(anc == a)[0])) for a in np.unique(anc)}
     main = ["eur", "eas", "afr", "amr", "csa", "mid"]
     wts = np.array([0.25, 0.25, 0.25, 0.1, 0.1, 0.05])
@@ -168,7 +184,19 @@ def simulate(G, anc, bim, n_target, rel_frac, seed):
             i, j = sorted((ix[a], ix[b]))
             truth[(i, j)] = k
     ancs = [P.ancs[x] for x in in_data]
+    if track:
+        return Gs, np.array(famid), np.array(ftype), truth, ancs, [P.labs[x] for x in in_data]
     return Gs, np.array(famid), np.array(ftype), truth, ancs
+
+
+def realized_ibd(li, lj, keep=None):
+    """realized (k0, k1, k2) and kinship k1/4 + k2/2 of a pair from their founder-haplotype labels
+    (2 x M each): at each SNP the number of i's haplotypes IBD with j's (0, 1 or 2; no inbreeding)"""
+    if keep is not None:
+        li, lj = li[:, keep], lj[:, keep]
+    n = ((li[0] == lj[0]) | (li[0] == lj[1])).astype(np.int8) + ((li[1] == lj[0]) | (li[1] == lj[1]))
+    k = np.bincount(n, minlength=3)[:3] / n.size
+    return k[0], k[1], k[2], k[1] / 4 + k[2] / 2
 
 
 def relation(i, j, k, ftype):
@@ -212,7 +240,8 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--N", type=int, default=5000)
     ap.add_argument("--rel", type=float, default=0.3)
-    ap.add_argument("--K", type=int, default=5, help="true number of ancestry axes + 1 (scored axes: K-1)")
+    ap.add_argument("--K", type=int, default=6, help="true number of ancestry axes + 1 (scored axes: K-1); "
+                    "HAPNEST chromosomes 12-22 has 5 axes")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--out", required=True)
@@ -240,7 +269,10 @@ def main():
     base = np.where(famid == 0)[0]
     rel = np.where(famid > 0)[0]
     kk = a.K - 1
+    # dwg-sketch: the very-large-N path (KING and the evalAdmix screen on each person's sketch
+    # neighbours) forced at this N
     methods = {"standard": "", "detect-white": "--robust detect-white", "dwg": "--robust",
+               "dwg-sketch": "--robust --king-search sketch --ea-search sketch",
                "dwg-dense": "--robust dwg --robust-engine dense"}
     rows = []
     for name, extra in methods.items():

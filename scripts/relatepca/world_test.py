@@ -21,10 +21,13 @@ SCEN = {"none": "", "mz2": "mz:CEU:2", "nuclear2": "child:CEU:2", "childx": "chi
         "avuncx": "avuncx:CHB:YRI", "asw": "sibs:ASW:2,child:ASW:1,grandx:ASW:CHB",
         "aswx": "halfsibx:ASW:CEU:CHB,avuncx:ASW:CHB"}
 METHODS = {"standard": "", "aarobust-kin": "--robust --impute-diag", "detect-white": "--robust detect-white",
-           "dwg": "--robust"}
+           "dwg": "--robust", "aarobust-kin-KING": "--robust --impute-diag --aarobust-king-only"}
 
 
-def main(bfile, pcaone, work, out):
+def main(bfile, pcaone, work, out, methods=None):
+    global METHODS
+    if methods:  # comma-separated subset, e.g. aarobust-kin,aarobust-kin-KING,dwg
+        METHODS = {m: METHODS[m] for m in methods.split(",")}
     os.makedirs(work, exist_ok=True)
     fam, bim, Gall = read_bed(bfile)
     lab = np.array([r[1] for r in fam])
@@ -91,4 +94,4 @@ def main(bfile, pcaone, work, out):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:5])
+    main(*sys.argv[1:6])

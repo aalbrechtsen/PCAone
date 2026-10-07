@@ -105,7 +105,9 @@ class Param {
   double robust_tol = 1e-6;  // operator engine: convergence tolerance of the subspace iterations
   double king_screen = 0.04;  // only pairs with KING kinship above this may be treated as related
   std::string king_search = "auto";  // operator engine candidates: all (KING over all pairs), sketch, or auto
-  int king_sketch_min = 20000;        // --king-search auto: sketch above this N
+  bool aar_king_only = false;  // aarobust-kin: KING candidates only (no family-axis / evalAdmix screen)
+  std::string ea_search = "auto";  // dwg operator engine, evalAdmix screen: all pairs, residual sketch, or auto (sketch above king_sketch_min)
+  int king_sketch_min = 5000;         // --king-search and --ea-search auto: sketch above this N (no accuracy loss seen at N = 2000-5000)
   int king_sketch_dim = 2048;         // columns of the count sketch
   int king_neighbours = 5;            // sketch neighbours checked per individual (extended for large families)
   std::string robust_engine = "auto";  // dense, operator (alias iram) or auto (dense up to robust_dense_max samples)

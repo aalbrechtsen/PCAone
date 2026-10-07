@@ -91,15 +91,20 @@ class Dropper:
         h2[het] = ~coin
         return np.stack([h1, h2])
 
-    def gamete(self, haps):
+    def gamete(self, haps, labs=None):
+        """one gamete; with labs (founder-haplotype labels, same shape as haps)
+        also the labels of the gamete, from the same crossovers (no extra draws)"""
         out = np.empty(haps.shape[1], dtype=np.int8)
+        lab = None if labs is None else np.empty(labs.shape[1], dtype=labs.dtype)
         for idx, pos in self.chroms:
             lo, hi = pos[0], pos[-1]
             nco = self.rng.poisson((hi - lo) / 1e8)  # 1 cM per Mb
             cuts = np.sort(self.rng.uniform(lo, hi, nco))
             which = (np.searchsorted(cuts, pos) + self.rng.integers(2)) % 2
             out[idx] = np.where(which == 0, haps[0, idx], haps[1, idx])
-        return out
+            if labs is not None:
+                lab[idx] = np.where(which == 0, labs[0, idx], labs[1, idx])
+        return out if labs is None else (out, lab)
 
 
 # ---------------------------------------------------------- pedigrees

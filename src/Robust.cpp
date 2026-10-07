@@ -78,6 +78,7 @@ void accumulate(const GenoBlock& X, const Mat1D& f, bool grm, Summaries& s, bool
   s.I0 += t + t.transpose();
   s.nhet += het.rowwise().sum();
   s.edge_sum += site_noise_var(X);
+  s.gsum += g.rowwise().sum();  // per-individual mean genotype (evalAdmix screens)
   if (grm) {
     Mat2D Z(N, b);
     for (Eigen::Index j = 0; j < b; ++j) {
@@ -104,7 +105,6 @@ void accumulate(const GenoBlock& X, const Mat1D& f, bool grm, Summaries& s, bool
       }
     }
     s.As.noalias() += Z * Z.transpose();
-    s.gsum += g.rowwise().sum();
   }
   s.M += b;
 }
@@ -1722,8 +1722,11 @@ static void run_dwg_operator(Data* data, const Param& params) {
   if (internal_king) pk.init(N, Msnp);
   const bool use_sketch =
       internal_king && (params.king_search == "sketch" || (params.king_search == "auto" && N > params.king_sketch_min));
-  RelSketch sk;  // always: also the residual sketch of the evalAdmix screen
-  sk.init(N, params.king_sketch_dim);
+  // evalAdmix screen: exact over all pairs, or each individual's nearest
+  // neighbours in the residual sketch (--ea-search; auto: sketch only at very large N)
+  const bool ea_sketch = params.ea_search == "sketch" || (params.ea_search == "auto" && N > params.king_sketch_min);
+  RelSketch sk;  // for the KING search and/or the residual sketch of the evalAdmix screen
+  if (use_sketch || ea_sketch) sk.init(N, params.king_sketch_dim);
 
   // ---- pass 1 ----------------------------------------------------------------
   Mat1D Dsum = Mat1D::Zero(N), Adiag = Mat1D::Zero(N), Asdiag = Mat1D::Zero(N), gsum = Mat1D::Zero(N);
@@ -1766,7 +1769,7 @@ static void run_dwg_operator(Data* data, const Param& params) {
       Ms += ms[t];
     }
     if (internal_king) pk.add(X, Msites, params.threads);
-    sk.add(X, Msites, params.threads);
+    if (use_sketch || ea_sketch) sk.add(X, Msites, params.threads);
     Msites += b;
   };
   tick.clock();
@@ -2002,60 +2005,110 @@ static void run_dwg_operator(Data* data, const Param& params) {
   // screen (no second neighbour search for candidates that did not become pairs)
   std::set<std::pair<int, int>> key, used(cand.begin(), cand.end());
   for (const auto& [i, j, phi] : F.pairs) key.emplace(i, j);
+  // exact screen: the raw Gram G G' (g scale) once, for the evalAdmix kinship of all pairs
+  Mat2D Araw;
+  if (!ea_sketch) {
+    const auto ta0 = std::chrono::steady_clock::now();
+    Araw = Mat2D::Zero(N, N);
+    for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index) {
+      const Mat2D g = 2.0 * X;
+      const Eigen::Index ts = 128, ntile = (N + ts - 1) / ts;
+      // row tiles of the lower triangle in parallel (disjoint rows, no reduction)
+#pragma omp parallel for num_threads(params.threads) schedule(dynamic)
+      for (Eigen::Index t = 0; t < ntile; ++t) {
+        const Eigen::Index r0 = t * ts, len = std::min(ts, N - r0);
+        Araw.block(r0, 0, len, r0 + len).noalias() += g.middleRows(r0, len) * g.topRows(r0 + len).transpose();
+      }
+    });
+    Araw.triangularView<Eigen::StrictlyUpper>() = Araw.transpose();
+    ++passes;
+    cao.print(tick.date(), "robust PCA (dwg): raw Gram for the evalAdmix screen over all pairs in",
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - ta0).count(), "seconds");
+  }
   int rounds = 0, n_ea = 0;
   for (; rounds < 5; ++rounds) {
-    // evalAdmix candidates: nearest neighbours in the sketch with the structure
-    // axes (and the mean) projected out, then the exact evalAdmix kinship
-    Mat2D Vx(N, F.axes.cols() + 1);
-    Vx.leftCols(F.axes.cols()) = F.axes;
-    Vx.col(F.axes.cols()).setOnes();
-    Eigen::HouseholderQR<Mat2D> qr(Vx);
-    const Eigen::MatrixXf Q = Mat2D(qr.householderQ() * Mat2D::Identity(N, Vx.cols())).cast<float>();
-    RelSketch rs;
-    rs.N = N;
-    rs.dim = Yraw.cols();
-    rs.Y = Yraw - Q * (Q.transpose() * Yraw);
-    rs.finish();
-    std::vector<std::vector<int>> nbr(N);
-    const int m = (int)std::min<Eigen::Index>(params.king_neighbours, N - 1);
-#pragma omp parallel for num_threads(params.threads) schedule(dynamic)
-    for (Eigen::Index r0 = 0; r0 < N; r0 += 64) top_neighbours(rs.Y, r0, std::min(N, r0 + 64), m, nbr);
-    // pre-filter: the residual-sketch correlation estimates 2 x kinship (sd
-    // about 1/sqrt(dim) for unrelated pairs, so the best unrelated neighbour
-    // reaches about 0.1 at N = 20,000). Only pairs that can pass tau (0.088,
-    // a correlation of about 0.18) matter; cross-ancestry 2nd-degree pairs had
-    // evalAdmix kinship of about 0.085. Pairs below 0.12 (kinship 0.06) are
-    // not worth the exact check.
-    std::set<std::pair<int, int>> ce_set;
-    for (Eigen::Index i = 0; i < N; ++i)
-      for (int j : nbr[i]) {
-        const auto pr = std::make_pair((int)std::min<Eigen::Index>(i, j), (int)std::max<Eigen::Index>(i, j));
-        if (!used.count(pr) && rs.Y.col(i).dot(rs.Y.col(j)) > 0.12f) ce_set.insert(pr);
-      }
-    rs = RelSketch();
-    std::vector<std::pair<int, int>> ce(ce_set.begin(), ce_set.end());
-    // exact evalAdmix kinship for these pairs (projection estimator, as --evaladmix)
-    Mat1D raw, wtd;
-    pair_sums(data, params, wscale2, ce, raw, wtd);
-    const Mat2D AV = M * gp.apply(Vx);  // G G' Vx on the g scale
-    const Mat2D Pinv = (Vx.transpose() * Vx).completeOrthogonalDecomposition().pseudoInverse();
-    const Mat2D CV = AV - M * gbar * (gbar.transpose() * Vx);
-    const Mat2D VCV = Vx.transpose() * CV, VDV = Vx.transpose() * D.asDiagonal() * Vx, VP = Vx * Pinv;
-    auto cw = [&](Eigen::Index i, Eigen::Index j, double Cij) {
-      return Cij - VP.row(i).dot(CV.row(j)) - CV.row(i).dot(VP.row(j)) + VP.row(i) * VCV * VP.row(j).transpose();
-    };
-    auto ew = [&](Eigen::Index i, Eigen::Index j) {
-      const double Pij = VP.row(i).dot(Vx.row(j));
-      return (i == j ? D(i) : 0.0) - Pij * D(j) - D(i) * Pij + VP.row(i) * VDV * VP.row(j).transpose();
-    };
     std::vector<std::pair<int, int>> pass_ea;
-    for (size_t c = 0; c < ce.size(); ++c) {
-      const int i = ce[c].first, j = ce[c].second;
-      const double bij = cw(i, j, raw(c) - M * gbar(i) * gbar(j)) /
-                         std::sqrt(std::max(cw(i, i, Adiag(i) - M * gbar(i) * gbar(i)) *
-                                                cw(j, j, Adiag(j) - M * gbar(j) * gbar(j)), 1e-300));
-      const double cij = ew(i, j) / std::sqrt(std::max(ew(i, i) * ew(j, j), 1e-300));
-      if ((bij - cij) / 2.0 > params.king_screen) pass_ea.push_back(ce[c]);
+    if (!ea_sketch) {
+      // exact evalAdmix kinship (b - c)/2 of every pair (projection estimator, as --evaladmix),
+      // with the rank-(r+1) projection expanded: (I-P) X (I-P) = X - VP X'V' ... costs N^2 r, not N^3
+      Mat2D Vx(N, F.axes.cols() + 1);
+      Vx.leftCols(F.axes.cols()) = F.axes;
+      Vx.col(F.axes.cols()).setOnes();
+      const Mat2D VP = Vx * (Vx.transpose() * Vx).completeOrthogonalDecomposition().pseudoInverse();
+      auto proj2 = [&](const Mat2D& X, const Mat2D& XV) {  // (I-P) X (I-P), X symmetric, XV = X Vx
+        const Mat2D VXV = Vx.transpose() * XV;
+        Mat2D Y = X;
+        Y.noalias() -= VP * XV.transpose();
+        Y.noalias() -= XV * VP.transpose();
+        Y.noalias() += VP * VXV * VP.transpose();
+        return Y;
+      };
+      auto cov2cor = [](Mat2D& C) {
+        const Mat1D s = C.diagonal().cwiseMax(1e-300).cwiseSqrt().cwiseInverse();
+        C = s.asDiagonal() * C * s.asDiagonal();
+      };
+      Mat2D b = Araw - M * gbar * gbar.transpose();
+      b = proj2(b, Mat2D(b * Vx));
+      cov2cor(b);
+      Mat2D c = proj2(Mat2D(D.asDiagonal()), Mat2D(D.asDiagonal() * Vx));
+      cov2cor(c);
+      const Mat2D ea = (b - c) / 2.0;
+      for (Eigen::Index j = 1; j < N; ++j)
+        for (Eigen::Index i = 0; i < j; ++i)
+          if (ea(i, j) > params.king_screen && !used.count({(int)i, (int)j})) pass_ea.emplace_back((int)i, (int)j);
+    } else {
+      // evalAdmix candidates: nearest neighbours in the sketch with the structure
+      // axes (and the mean) projected out, then the exact evalAdmix kinship
+      Mat2D Vx(N, F.axes.cols() + 1);
+      Vx.leftCols(F.axes.cols()) = F.axes;
+      Vx.col(F.axes.cols()).setOnes();
+      Eigen::HouseholderQR<Mat2D> qr(Vx);
+      const Eigen::MatrixXf Q = Mat2D(qr.householderQ() * Mat2D::Identity(N, Vx.cols())).cast<float>();
+      RelSketch rs;
+      rs.N = N;
+      rs.dim = Yraw.cols();
+      rs.Y = Yraw - Q * (Q.transpose() * Yraw);
+      rs.finish();
+      std::vector<std::vector<int>> nbr(N);
+      const int m = (int)std::min<Eigen::Index>(params.king_neighbours, N - 1);
+#pragma omp parallel for num_threads(params.threads) schedule(dynamic)
+      for (Eigen::Index r0 = 0; r0 < N; r0 += 64) top_neighbours(rs.Y, r0, std::min(N, r0 + 64), m, nbr);
+      // pre-filter: the residual-sketch correlation estimates 2 x kinship (sd
+      // about 1/sqrt(dim) for unrelated pairs, so the best unrelated neighbour
+      // reaches about 0.1 at N = 20,000). Only pairs that can pass tau (0.088,
+      // a correlation of about 0.18) matter; cross-ancestry 2nd-degree pairs had
+      // evalAdmix kinship of about 0.085. Pairs below 0.12 (kinship 0.06) are
+      // not worth the exact check.
+      std::set<std::pair<int, int>> ce_set;
+      for (Eigen::Index i = 0; i < N; ++i)
+        for (int j : nbr[i]) {
+          const auto pr = std::make_pair((int)std::min<Eigen::Index>(i, j), (int)std::max<Eigen::Index>(i, j));
+          if (!used.count(pr) && rs.Y.col(i).dot(rs.Y.col(j)) > 0.12f) ce_set.insert(pr);
+        }
+      rs = RelSketch();
+      std::vector<std::pair<int, int>> ce(ce_set.begin(), ce_set.end());
+      // exact evalAdmix kinship for these pairs (projection estimator, as --evaladmix)
+      Mat1D raw, wtd;
+      pair_sums(data, params, wscale2, ce, raw, wtd);
+      const Mat2D AV = M * gp.apply(Vx);  // G G' Vx on the g scale
+      const Mat2D Pinv = (Vx.transpose() * Vx).completeOrthogonalDecomposition().pseudoInverse();
+      const Mat2D CV = AV - M * gbar * (gbar.transpose() * Vx);
+      const Mat2D VCV = Vx.transpose() * CV, VDV = Vx.transpose() * D.asDiagonal() * Vx, VP = Vx * Pinv;
+      auto cw = [&](Eigen::Index i, Eigen::Index j, double Cij) {
+        return Cij - VP.row(i).dot(CV.row(j)) - CV.row(i).dot(VP.row(j)) + VP.row(i) * VCV * VP.row(j).transpose();
+      };
+      auto ew = [&](Eigen::Index i, Eigen::Index j) {
+        const double Pij = VP.row(i).dot(Vx.row(j));
+        return (i == j ? D(i) : 0.0) - Pij * D(j) - D(i) * Pij + VP.row(i) * VDV * VP.row(j).transpose();
+      };
+      for (size_t c = 0; c < ce.size(); ++c) {
+        const int i = ce[c].first, j = ce[c].second;
+        const double bij = cw(i, j, raw(c) - M * gbar(i) * gbar(j)) /
+                           std::sqrt(std::max(cw(i, i, Adiag(i) - M * gbar(i) * gbar(i)) *
+                                                  cw(j, j, Adiag(j) - M * gbar(j) * gbar(j)), 1e-300));
+        const double cij = ew(i, j) / std::sqrt(std::max(ew(i, i) * ew(j, j), 1e-300));
+        if ((bij - cij) / 2.0 > params.king_screen) pass_ea.push_back(ce[c]);
+      }
     }
     const std::vector<double> k0 = dwg_k0(data, params, F.axes, Mat2D(), pass_ea);
     std::vector<std::pair<int, int>> add;
@@ -2379,7 +2432,8 @@ void run_robust(Data* data, const Param& params) {
   const double tau = params.kin_min;
   const std::string& mode = params.robust;
   const bool need_grm = mode == "aarobust-kin" || mode == "diag-impute";
-  const bool need_dwg = mode == "dwg";
+  // dwg, and aarobust-kin with its screen (structure / family axes from the dwg rank stepping)
+  const bool need_dwg = mode == "dwg" || (mode == "aarobust-kin" && !params.aar_king_only);
   cao.print(tick.date(), "robust PCA (", mode, "): N =", N, ", k =", k, ", tau =", tau,
             ", KING screen =", params.king_screen);
 
@@ -2515,8 +2569,66 @@ void run_robust(Data* data, const Param& params) {
   } else if (mode == "aarobust-kin") {
     Mat2D C = s.C / M, S;
     const double t_edge = 1.1 * 2.0 * std::sqrt((double)N / M) * C.diagonal().mean();
-    Mat2D L = params.pcp_edge ? pcp_kin_soft(C, tau, cand, S, t_edge, params.pcp_iram)
-                              : pcp_kin(C, tau, cand, S, params.pcp_iram);
+    auto fit_pcp = [&](const MatB& cc, Mat2D& Sx) {
+      return params.pcp_edge ? pcp_kin_soft(C, tau, cc, Sx, t_edge, params.pcp_iram)
+                             : pcp_kin(C, tau, cc, Sx, params.pcp_iram);
+    };
+    Mat2D L = fit_pcp(cand, S);
+    // candidates beyond KING, as dwg: the related pairs of the dwg fit (which adds the pairs
+    // of family axes) and the evalAdmix kinship from its structure axes, confirmed by k0;
+    // PCP (phi_S > tau) decides; refitted until the related pairs no longer change
+    int rounds = 0, n_ea = 0, n_fam = 0;
+    if (!params.aar_king_only) {
+      const Mat1D gbar = s.gsum / M;
+      auto pair_set = [&](const Mat2D& Sx) {
+        std::set<std::pair<int, int>> ps;
+        for (Eigen::Index j = 0; j < N; ++j)
+          for (Eigen::Index i = 0; i < j; ++i)
+            if (std::abs(Sx(i, j)) > 1e-12) ps.emplace(i, j);
+        return ps;
+      };
+      MatB used = cand;
+      std::set<std::pair<int, int>> key = pair_set(S);
+      // the dwg rank stepping on the GRM scale (noise edge, family axes) with the current
+      // candidates: its structure axes, and its related pairs (incl. those found through
+      // family axes) as candidates for PCP; PCP's own fit is full rank, so its eigenvectors
+      // cannot separate structure from families
+      const Mat2D As = s.As / (double)s.Ms;
+      const double edge = 2.0 * std::sqrt(s.edge_sum_s / ((double)s.Ms * s.Ms)) * std::sqrt((double)N);
+      for (; rounds < 5; ++rounds) {
+        const DwgFit Fd = dwg_fit(As, tau, used, edge, k + 1);
+        MatB c2 = used;
+        n_fam = 0;
+        for (const auto& [i, j, phi] : Fd.pairs)
+          if (!c2(i, j)) {
+            c2(i, j) = c2(j, i) = true;
+            ++n_fam;
+          }
+        const Mat2D axes = Fd.axes.cols() > 0 ? Fd.axes : Mat2D(Fd.V.col(std::min<int>(1, Fd.V.cols() - 1)));
+        if (params.verbose > 1)
+          cao.print(tick.date(), "robust PCA (aarobust-kin): screen rank", Fd.r, "->", axes.cols(), "structure axes");
+        const Mat2D ea = dwg_evaladmix(s.A, gbar, D, M, axes);
+        std::vector<std::pair<int, int>> ce;
+        for (Eigen::Index j = 0; j < N; ++j)
+          for (Eigen::Index i = 0; i < j; ++i)
+            if (ea(i, j) > params.king_screen && !c2(i, j)) ce.emplace_back(i, j);
+        const std::vector<double> k0 = dwg_k0(data, params, axes, s.I0, ce);
+        n_ea = 0;
+        for (size_t c = 0; c < ce.size(); ++c)
+          if (k0[c] < DWG_K0_MAX) {
+            c2(ce[c].first, ce[c].second) = c2(ce[c].second, ce[c].first) = true;
+            ++n_ea;
+          }
+        if (c2 == used) break;  // nothing new: the fit would be the same
+        used = c2;
+        L = fit_pcp(used, S);
+        const std::set<std::pair<int, int>> nk = pair_set(S);
+        if (nk == key) break;
+        key = nk;
+      }
+      cao.print(tick.date(), "robust PCA (aarobust-kin): candidates from KING,", n_fam, "from the dwg fit (incl. family axes) and", n_ea,
+                "from evalAdmix + k0 in the last round;", rounds + 1, "screen rounds");
+    }
     if (params.impute_diag) {
       top_eig(L, k, w, U);  // the fitted structure, diagonal imputed
     } else {

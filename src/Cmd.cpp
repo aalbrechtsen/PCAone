@@ -129,8 +129,10 @@ Param::Param(int argc, char** argv) {
   opts.add<Switch, Attribute::advanced>("", "pcp-edge", "--robust aarobust-kin / --impute-diag: stop lowering the PCP threshold at the noise edge of the GRM, so the fit stays low rank.", &pcp_edge);
   opts.add<Switch, Attribute::advanced>("", "pcp-iram", "--robust aarobust-kin / --impute-diag: compute only the eigenpairs above the PCP threshold with IRAM instead of full eigendecompositions.", &pcp_iram);
   opts.add<Value<int>, Attribute::advanced>("", "robust-dense-max", "--robust-engine auto: largest N for the dense engine.", robust_dense_max, &robust_dense_max);
+  opts.add<Switch, Attribute::advanced>("", "aarobust-king-only", "--robust aarobust-kin: candidate pairs from KING only (no family-axis and evalAdmix screen, as before v0.7.3).", &aar_king_only);
+  opts.add<Value<std::string>>("", "ea-search", "--robust dwg, operator engine: how the evalAdmix screen finds candidate pairs. all: exact evalAdmix kinship over all pairs; sketch: each individual's nearest neighbours in the residual sketch (very large N); auto: sketch above --king-sketch-min samples.", ea_search, &ea_search);
   opts.add<Value<std::string>>("", "king-search", "--robust-engine operator without --kinship: how candidate pairs are found. all: KING-robust over all pairs; sketch: KING-robust for each individual's nearest neighbours in a genotype sketch (very large N); auto: sketch above --king-sketch-min samples.", king_search, &king_search);
-  opts.add<Value<int>, Attribute::advanced>("", "king-sketch-min", "--king-search auto: smallest N + 1 that uses the sketch.", king_sketch_min, &king_sketch_min);
+  opts.add<Value<int>, Attribute::advanced>("", "king-sketch-min", "--king-search and --ea-search auto: the sketch is used above this many samples.", king_sketch_min, &king_sketch_min);
   opts.add<Value<int>, Attribute::advanced>("", "king-sketch-dim", "--king-search sketch: number of sketch columns.", king_sketch_dim, &king_sketch_dim);
   opts.add<Value<int>, Attribute::advanced>("", "king-neighbours", "--king-search sketch: neighbours checked per individual (doubled while all of them are relatives).", king_neighbours, &king_neighbours);
   opts.add<Value<double>>("", "king-screen", "--robust: only pairs with KING-robust kinship above this may be treated as related.", king_screen, &king_screen);
@@ -291,6 +293,8 @@ Param::Param(int argc, char** argv) {
         throw std::invalid_argument("--robust-pcs must be operator or winsvd");
       if (king_search != "auto" && king_search != "all" && king_search != "sketch")
         throw std::invalid_argument("--king-search must be all, sketch or auto");
+      if (ea_search != "auto" && ea_search != "all" && ea_search != "sketch")
+        throw std::invalid_argument("--ea-search must be all, sketch or auto");
       if (king_sketch_dim < 64 || king_neighbours < 1)
         throw std::invalid_argument("--king-sketch-dim must be >= 64 and --king-neighbours >= 1");
       if (impute_diag && robust != "auto" && robust != "aarobust-kin")
