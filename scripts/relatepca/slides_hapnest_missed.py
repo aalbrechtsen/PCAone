@@ -77,22 +77,23 @@ def main():
         m = sec & (rel == c)
         print(f"{c:30s} pairs {m.sum():3d} missed {(m & ~found).sum():2d}")
     print("other 2nd-degree labels", set(rel[sec]) - {c for c, _ in cats})
-    fig, ax = plt.subplots(figsize=(8, 3.9))
+    # found and missed 2nd-degree pairs in separate panels, on the true realized kinship
+    fig, axs = plt.subplots(2, 1, figsize=(8, 3.9), sharex=True, gridspec_kw=dict(height_ratios=(2, 1)))
     bins = np.linspace(0.04, 0.22, 46)
-    data = [phi[sec & (rel == c)] for c, _ in cats]
-    labs = [f"{c} ({(sec & (rel == c) & ~found).sum()} of {(sec & (rel == c)).sum()} missed)" for c, _ in cats]
-    ax.hist(data, bins=bins, stacked=True, color=[c_ for _, c_ in cats], label=labs)
-    ax.axvline(B.TAU, color=INK, ls="--", lw=1.2)
-    ax.axvline(0.125, color=MUTED, ls=":", lw=1.2)
-    top = ax.get_ylim()[1]
-    ax.text(B.TAU - 0.002, top * 0.97, "missed | found", fontsize=10, color=INK, va="top", ha="center")
-    ax.text(B.TAU - 0.002, top * 0.86, "$\\tau = 2^{-3.5}$", fontsize=10, color=INK, va="top", ha="right")
-    ax.text(0.127, top * 0.97, "expected", fontsize=10, color=MUTED, va="top")
-    ax.set_xlabel("true realized kinship of the 2nd-degree pairs (IBD from the simulation)", color=MUTED)
-    ax.set_ylabel("pairs", color=MUTED)
-    for s_ in ["top", "right"]:
-        ax.spines[s_].set_visible(False)
-    ax.legend(frameon=False, fontsize=10, loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2, columnspacing=1.2)
+    for ax, sel, col, lab in [(axs[0], sec & found, "#BBBBBB", "found"), (axs[1], sec & ~found, "#6a51a3", "missed")]:
+        ax.hist(phi[sel], bins=bins, color=col)
+        ax.axvline(B.TAU, color=INK, ls="--", lw=1.2)
+        ax.axvline(0.125, color=MUTED, ls=":", lw=1.2)
+        ax.text(0.215, ax.get_ylim()[1] * 0.92, f"{lab} by dwg ({sel.sum()} of {sec.sum()})", ha="right", va="top",
+                fontsize=11, color=INK)
+        ax.set_ylabel("pairs", color=MUTED)
+        for s_ in ["top", "right"]:
+            ax.spines[s_].set_visible(False)
+    top = axs[0].get_ylim()[1]
+    axs[0].text(B.TAU - 0.002, top * 0.97, "$\\tau = 2^{-3.5}$\n(cutoff on the\nestimate)", fontsize=9.5,
+                color=INK, va="top", ha="right")
+    axs[0].text(0.127, top * 0.97, "expected", fontsize=9.5, color=MUTED, va="top")
+    axs[1].set_xlabel("true realized kinship of the 2nd-degree pairs (IBD from the simulation)", color=MUTED)
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)

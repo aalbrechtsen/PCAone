@@ -245,6 +245,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--methods", default="", help="comma-separated subset of the methods (default: all)")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     fam, bim, G = read_bed(a.pool)
@@ -274,6 +275,8 @@ def main():
     methods = {"standard": "", "detect-white": "--robust detect-white", "dwg": "--robust",
                "dwg-sketch": "--robust --king-search sketch --ea-search sketch",
                "dwg-dense": "--robust dwg --robust-engine dense"}
+    if a.methods:
+        methods = {m: methods[m] for m in a.methods.split(",")}
     rows = []
     for name, extra in methods.items():
         for k in (kk, 20):
