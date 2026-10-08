@@ -28,7 +28,14 @@ class FilePgen : public Data {
     reader_threads = std::max(1u, params.threads);
     reader.Load(fpgen, nsamples, {}, reader_threads);
     nsnps = reader.GetVariantCt();
-    dosage_mode = (!params.hardcall) && reader.DosagePresent();
+    // --inbreed tests the called genotypes (InbredSites.cpp compares each value
+    // with the three genotype codes), so a fractional dosage has no genotype
+    // there and used to count as missing: F came out ~1 at every site.
+    dosage_mode = (!params.hardcall) && (params.inbreed == 0) && reader.DosagePresent();
+    if (params.inbreed != 0 && !params.hardcall && reader.DosagePresent())
+      cao.warn(
+          "--inbreed uses the hard calls of the PGEN; its dosages are ignored. build the reference PCA "
+          "with --hardcall too, so that its allele frequencies come from the same genotypes");
     cao.print(tick.date(), "N (# samples):", nsamples, ", M (# SNPs):", nsnps, ". dosage_mode:", dosage_mode);
 
     snpmajor = true;
@@ -50,6 +57,7 @@ class FilePgen : public Data {
   uint reader_threads = 1;
   std::vector<std::vector<double>> thread_bufs;
   bool frequency_was_estimated = false;
+  uint64 nmono_seen = 0;  // sites with MAF=0 met while estimating F block by block
   bool dosage_mode = false;
   // ReadHardcalls returns 0.0/1.0/2.0/-3.0; map to lookup index 0/1/2/3
   static int pgen_code(double v) { return (v == -3.0) ? 3 : static_cast<int>(v); }

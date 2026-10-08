@@ -26,9 +26,15 @@ static inline double centered_pgen_value(double v, double af) {
 
 void FilePgen::read_all() {
   uint i, j;
-  if (params.dopca && !frequency_was_estimated) {
+  if (params.dopca && !frequency_was_estimated && !params.filterSNP) {
+    // One pass: decode each variant into G, take F from that column, centre it.
+    // The two-pass path below decodes every variant twice (once for F, once for
+    // G), which a --maf filter needs; without one it is ~1.4x the read time.
     F = Mat1D::Zero(nsnps);
-#pragma omp parallel for private(i, j) schedule(static)
+    G = Mat2D::Zero(nsamples, nsnps);
+    if (params.missme) C = ArrBool::Zero((uint64)nsnps * nsamples);
+    uint64 nmono = 0;
+#pragma omp parallel for private(i, j) schedule(static) reduction(+ : nmono)
     for (i = 0; i < nsnps; ++i) {
       int thr = omp_get_thread_num();
       double* buf = thread_bufs[thr].data();
@@ -46,17 +52,51 @@ void FilePgen::read_all() {
         }
       }
       F(i) = (c > 0) ? sum / c : 0.0;
-      if (F(i) == 0.0 || F(i) == 1.0) cao.warn("sites with MAF=0 found! remove them first! SNP index:", i);
-      if (params.ld && params.verbose > 1 && F(i) == 0.5)
-        cao.warn("sites with MAF=0.5 found in LD estimation. NaN values expected! SNP index:", i);
+      if (F(i) == 0.0 || F(i) == 1.0) ++nmono;
+      for (j = 0; j < nsamples; ++j) {
+        G(j, i) = pgen2dosage(buf[j]);
+        if (params.missme && G(j, i) == BED_MISSING_VALUE) C[(uint64)i * nsamples + j] = 1;
+        if (params.center) G(j, i) = (G(j, i) == BED_MISSING_VALUE) ? 0.0 : G(j, i) - F(i);
+      }
     }
+    warn_monomorphic(nmono);
+    if (params.missme) {
+      p_miss = (double)C.count() / (double)C.size();
+      cao.print(tick.date(), "the proportion of missingness  is", p_miss);
+    }
+    return;
+  }
+  if (params.dopca && !frequency_was_estimated) {
+    F = Mat1D::Zero(nsnps);
+    uint64 nmono = 0;
+#pragma omp parallel for private(i, j) schedule(static) reduction(+ : nmono)
+    for (i = 0; i < nsnps; ++i) {
+      int thr = omp_get_thread_num();
+      double* buf = thread_bufs[thr].data();
+      if (dosage_mode) {
+        reader.Read(buf, nsamples, thr, i, 1);
+      } else {
+        reader.ReadHardcalls(buf, nsamples, thr, i, 1);
+      }
+      uint64 c = 0;
+      double sum = 0.0;
+      for (j = 0; j < nsamples; ++j) {
+        if (buf[j] != PGEN_MISSING) {
+          sum += buf[j] / 2.0;
+          ++c;
+        }
+      }
+      F(i) = (c > 0) ? sum / c : 0.0;
+      if (F(i) == 0.0 || F(i) == 1.0) ++nmono;  // counted: cao is not thread-safe
+    }
+    warn_monomorphic(nmono);
     filter_snps_resize_F();
   }
   const bool filter = !keepSNPs.empty();
   if (filter) nsnps = keepSNPs.size();
   G = Mat2D::Zero(nsamples, nsnps);
 
-  if (params.missme) C = ArrBool::Zero(nsnps * nsamples);
+  if (params.missme) C = ArrBool::Zero((uint64)nsnps * nsamples);
 
 #pragma omp parallel for private(i, j) schedule(static)
   for (i = 0; i < nsnps; ++i) {
@@ -70,7 +110,7 @@ void FilePgen::read_all() {
     }
     for (j = 0; j < nsamples; ++j) {
       G(j, i) = pgen2dosage(buf[j]);
-      if ((params.missme && G(j, i) == BED_MISSING_VALUE)) C[i * nsamples + j] = 1;
+      if ((params.missme && G(j, i) == BED_MISSING_VALUE)) C[(uint64)i * nsamples + j] = 1;
     }
     if (params.center) {
       for (j = 0; j < nsamples; ++j) {
@@ -121,9 +161,8 @@ PermMat compute_pgen_perm(uint nsnps, uint nbatches, uint blocksize, uint nthrea
     source_start = source_stop;
   }
 
-  auto rng = std::default_random_engine{};
-  rng.seed(seed);
-  for (auto& source : source_by_thread) std::shuffle(source.begin(), source.end(), rng);
+  PortableRng rng(seed);
+  for (auto& source : source_by_thread) portable_shuffle(source.begin(), source.end(), rng);
 
   std::vector<uint64> next_by_thread(nthreads, 0);
   Eigen::VectorXi indices(nsnps);
@@ -190,7 +229,9 @@ void FilePgen::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standa
       }
     }
   } else {
-#pragma omp parallel for private(i, j, snp_idx) schedule(static)
+    if (start_idx == 0) nmono_seen = 0;  // a pass over the blocks restarted before F was complete
+    uint64 nmono = 0;
+#pragma omp parallel for private(i, j, snp_idx) schedule(static) reduction(+ : nmono)
     for (i = 0; i < actual_block_size; ++i) {
       int thr = omp_get_thread_num();
       double* buf = thread_bufs[thr].data();
@@ -212,9 +253,7 @@ void FilePgen::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standa
         }
       }
       F(snp_idx) = (c > 0) ? sum / c : 0.0;
-      if (F(snp_idx) == 0.0 || F(snp_idx) == 1.0) cao.warn("sites with MAF=0 found! remove them first!");
-      if (params.ld && params.verbose > 1 && F(snp_idx) == 0.5)
-        cao.warn("MAF for site ", snp_idx, " is 0.5. NaN values expected in calculating LD R2.");
+      if (F(snp_idx) == 0.0 || F(snp_idx) == 1.0) ++nmono;
       if (!dosage_mode) {
         // centered_geno_lookup: rows 0=HomRef, 1=Het, 2=HomAlt, 3=missing
         centered_geno_lookup(3, snp_idx) = 0.0;               // missing: impute to mean
@@ -237,9 +276,13 @@ void FilePgen::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standa
         G(j, i) *= scale_factor;
       }
     }
+    nmono_seen += nmono;
   }
 
-  if (stop_idx + 1 == nsnps) frequency_was_estimated = true;
+  if (stop_idx + 1 == nsnps && !frequency_was_estimated) {
+    frequency_was_estimated = true;
+    warn_monomorphic(nmono_seen);
+  }
 }
 
 void FilePgen::read_block_update(

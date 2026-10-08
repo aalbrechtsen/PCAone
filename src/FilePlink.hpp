@@ -1,8 +1,11 @@
 #ifndef PCAONE_FILEPLINK_
 #define PCAONE_FILEPLINK_
 
+#include "BedWindow.hpp"
 #include "Data.hpp"
 #include "Utils.hpp"
+
+#include <memory>
 
 class FileBed : public Data {
  public:
@@ -15,6 +18,7 @@ class FileBed : public Data {
     nsamples = count_lines(ffam);
     nsnps = count_lines(fbim);
     cao.print(tick.date(), "N (# samples):", nsamples, ", M (# SNPs):", nsnps);
+    if (!nsamples || !nsnps) cao.error("BED input must contain at least one sample and one SNP.");
     snpmajor = true;
     bed_bytes_per_snp = (nsamples + 3) >> 2;
     std::string fbed = params.filein + ".bed";
@@ -23,15 +27,22 @@ class FileBed : public Data {
     // check magic number of bed file
     uchar header[3];
     bed_ifstream.read(reinterpret_cast<char*>(&header[0]), 3);
-    if ((header[0] != 0x6c) || (header[1] != 0x1b) || (header[2] != 0x01))
+    if (!bed_ifstream || (header[0] != 0x6c) || (header[1] != 0x1b) || (header[2] != 0x01))
       cao.error("Incorrect magic number in plink bed file.");
     if (params.center) centered_geno_lookup = Arr2D::Zero(4, nsnps);
     if (params.dopca) F = Mat1D::Zero(nsnps);  // initial F
   }
 
-  ~FileBed() override = default;
+  ~FileBed() override;
 
   void read_all() final;
+  // Called after prepare(), before any genotype reads or frequency estimates.
+  void apply_permutation(Param& config);
+  // Alternative to apply_permutation(): band b of the -w bands holds the SNPs
+  // b, b+W, b+2W, ... in source order, read straight from the input BED through
+  // a window of whole bands held in --perm-mem GiB. No permuted copy is written.
+  // Called after prepare(); realigns the blocks so each band is one interleave set.
+  void apply_logical_permutation(const Param& config);
   // for blockwise
   void check_file_offset_first_var() final;
 
@@ -43,9 +54,15 @@ class FileBed : public Data {
   std::ifstream bed_ifstream;
   uint64 bed_bytes_per_snp;
   bool frequency_was_estimated = false;
+  uint64 nmono_seen = 0;  // sites with MAF=0 met while estimating F block by block
   std::vector<uchar> inbed;
+  std::unique_ptr<PCAone::BedWindowReader> window_reader;  // set by apply_logical_permutation()
+  // fill inbed with the records of SNPs [start_idx, start_idx + count)
+  void read_records(uint64 start_idx, uint64 count);
 };
 
-PermMat permute_plink(std::string& fin, const std::string& fout, uint gb, uint nbands);
+// Shuffles the SNPs into random buckets of `bucket` SNPs, source order kept
+// within each, and writes <fout>.perm.{bed,bim,fam}. fin becomes <fout>.perm.
+PermMat permute_plink(std::string& fin, const std::string& fout, uint gb, uint64 bucket, int seed);
 
 #endif  // PCAONE_FILEPLINK_

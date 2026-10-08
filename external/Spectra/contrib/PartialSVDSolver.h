@@ -159,6 +159,13 @@ public:
     // Computation
     Index compute(Index maxit = 1000, Scalar tol = 1e-10)
     {
+        // PCAone patch: matrix_U()/matrix_V() cache the eigenvectors in
+        // m_evecs and only fetch them when the cache is empty. A solver whose
+        // matrix is updated in place and re-computed -- which is exactly what
+        // the EM-PCA loop in Arnoldi.cpp does -- then keeps handing back the
+        // singular vectors of the FIRST decomposition forever. Invalidate the
+        // cache here so every compute() is observed by the accessors.
+        m_evecs.resize(0, 0);
         m_eigs->init();
         m_nconv = m_eigs->compute(SortRule::LargestAlge, maxit, tol);
 
@@ -202,7 +209,20 @@ public:
             return m_evecs.leftCols(nv);
         }
 
-        return m_mat.transpose() * (m_evecs.leftCols(nv).array().rowwise() / m_eigs->eigenvalues().head(nv).transpose().array().sqrt()).matrix();
+        // PCAone patch: the product in column panels of m_mat, one thread each.
+        // A multithreaded m_mat' * W packed a kc x cols() block of m_mat' --
+        // nearly a copy of m_mat when it has few rows -- and was slower.
+        const Matrix W = (m_evecs.leftCols(nv).array().rowwise() / m_eigs->eigenvalues().head(nv).transpose().array().sqrt()).matrix();
+        Matrix V(m_n, nv);
+        const Index bs = (std::max)(Index(64), (Index(1) << 18) / (std::max)(Index(1), m_m));
+        const Index nb = (m_n + bs - 1) / bs;
+#pragma omp parallel for schedule(static)
+        for (Index b = 0; b < nb; ++b)
+        {
+            const Index c = b * bs, w = (std::min)(bs, m_n - c);
+            V.middleRows(c, w).noalias() = m_mat.middleCols(c, w).transpose() * W;
+        }
+        return V;
     }
 };
 

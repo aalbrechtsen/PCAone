@@ -59,7 +59,10 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
   if (!params.out_of_core) {
     // SpMatrix sG = data->G.sparseView();
     PartialSVDSolver<Mat2D> svds(data->G, params.k, params.ncv);
-    if (!(params.missme || params.ld)) data->standardize_E();
+    // only genotypes are standardized, as in run_pca_with_halko(). CSV has no F,
+    // so standardize_E() read past the end of it and segfaulted
+    bool standardized = !params.missme && params.genetic;
+    if (standardized) data->standardize_E();
     data->whiten_G();
     nconv = svds.compute(params.imaxiter, params.itol);
     if (nconv != params.k) cao.error("the nconv is not equal to k.");
@@ -79,14 +82,24 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
         U = svds.matrix_U(params.k);
         V2 = svds.matrix_V(params.k);
         flip_UV(U, V2);
-        diff = rmse(V2, V);
+        // Same measure as run_pca_with_halko() and the FULL solver, so that a
+        // given --tol-em means the same thing whichever -d the user picked.
+        // This used to be rmse(), which divides by sqrt(nsnps * k) and so hit
+        // any fixed tolerance far earlier -- IRAM stopped after 4 EM
+        // iterations where the other solvers took 10, and settled short of the
+        // EM fixed point despite being the more accurate decomposition.
+        if (params.mev)
+          diff = 1.0 - mev(V2, V);
+        else
+          diff = minSSE(V2, V).sum() / V.cols();
         if (params.verbose)
-          cao.print(tick.date(), "individual allele frequencies estimated (iter =", i, "), RMSE =", diff);
+          cao.print(tick.date(), "individual allele frequencies estimated (iter =", i, "), diff =", diff);
         V = V2;
         if (diff < params.tolem) {
           cao.print(tick.date(), "come to convergence!");
           break;
         }
+        if (i == params.maxiter) warn_em_not_converged(params, diff);
       }
 
       if (params.pcangsd) {
@@ -94,19 +107,16 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
         data->pcangsd_standardize_E(U, svals, V.transpose());
         evals.noalias() = svals.array().square().matrix() / data->nsnps;
         if (params.file_t == FileType::BEAGLE) {
-          Mat2D C = data->G * data->G.transpose();
-          C.array() /= (double)data->nsnps;
-          C.diagonal() = data->Dc.array() / (double)data->nsnps;
-          std::ofstream fcov(params.fileout + ".cov");
-          if (fcov.is_open()) fcov << C << "\n";
-          Eigen::JacobiSVD<Mat2D> svd(C, Eigen::ComputeThinU | Eigen::ComputeThinV);
-          // output real eigenvectors of covariance in eigvecs2
-          write_eigvecs2_beagle(svd.matrixU(), params.filein, params.fileout + ".eigvecs2");
+          write_pcangsd_cov(data->G, data->Dc, data->nsnps, params);
         }
       }
 
       if (params.emu) {
         cao.print(tick.date(), "standardize the final matrix");
+        standardized = true;
+        // the missing entries still held the imputation from the previous
+        // iteration; run_pca_with_halko() refits them from the final U, S, V
+        data->fit_with_pi(U, svals, V.transpose());
         data->standardize_E();
         svds.compute(params.imaxiter, params.itol);
         svals = svds.singular_values();
@@ -117,7 +127,7 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
       }
     }
     // write to files; NOTE: pcangsd only gives us evals of covariance matrix
-    if (params.ld && !params.pcangsd) data->write_residuals(svals, U, V.transpose());
+    data->set_svd_transform(standardized);
     data->write_eigs_files(evals, svals, U, V);
   } else {
     // for blockwise
@@ -126,7 +136,8 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
     // SymEigsSolver< double, LARGEST_ALGE, ArnoldiOpData >(op, params.k,
     // params.ncv);
     SymEigsSolver<ArnoldiOpData>* eigs = new SymEigsSolver<ArnoldiOpData>(*op, params.k, params.ncv);
-    if (!params.missme) op->setFlags(false, true);
+    bool standardized = !params.missme && params.genetic;  // as in-core above
+    op->setFlags(false, standardized);
     eigs->init();
     nconv = eigs->compute(SortRule::LargestAlge, params.imaxiter, params.itol);
     if (nconv < params.k) cao.error("the nconv is not equal to k");
@@ -143,16 +154,17 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
     U = (eigs->eigenvectors().leftCols(nu).transpose().array().colwise() / eigs->eigenvalues().head(nu).array().sqrt())
             .matrix();
     op->VT = Mat2D::Zero(U.rows(), data->nsnps);
-    data->calcu_vt_initial(U, op->VT, true);
+    data->calcu_vt_initial(U, op->VT, standardized);
     evals.noalias() = eigs->eigenvalues() / data->nsnps;
     // impute information via EM-PCA
     if (params.missme) {
       if (data->p_miss == 0.0) cao.warn("there is no missing values");
       cao.print(tick.date(), "starts EM iteration. maxiter =", params.maxiter);
-      data->calcu_vt_initial(U, op->VT, false);
+      // op->VT was computed just above with standardized = false, which is what
+      // this pass recomputed: a whole pass over the data for nothing
       flip_UV(op->U, op->VT);
       op->setFlags(true, false);
-      for (uint i = 1; i <= params.maxiter; ++i) {
+      for (uint i = 1; i <= params.maxiter; ++i) {  // in-core runs maxiter, not maxiter - 1
         V = op->VT;
         eigs->init();
         nconv = eigs->compute(SortRule::LargestAlge, params.imaxiter, params.itol);
@@ -167,16 +179,25 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
         op->S = eigs->eigenvalues().cwiseSqrt();
         op->U = eigs->eigenvectors().leftCols(nu);
         flip_UV(op->U, op->VT);
-        diff = rmse(op->VT, V);
+        // VT is k x nsnps here, so transpose before measuring like the in-core
+        // loop above does. The stopping threshold is --tol-em; this compared
+        // against params.tol (--tol-rsvd, and ten times looser by default),
+        // which left --tol-em with no effect at all on out-of-core IRAM.
+        if (params.mev)
+          diff = 1.0 - mev(op->VT.transpose(), V.transpose());
+        else
+          diff = minSSE(op->VT.transpose(), V.transpose()).sum() / op->VT.rows();
         if (params.verbose)
-          cao.print(tick.date(), "individual allele frequencies estimated (iter =", i, "), RMSE =", diff);
-        if (diff < params.tol) {
+          cao.print(tick.date(), "individual allele frequencies estimated (iter =", i, "), diff =", diff);
+        if (diff < params.tolem) {
           cao.print(tick.date(), "come to convergence!");
           break;
         }
+        if (i == params.maxiter) warn_em_not_converged(params, diff);
       }
 
-      op->setFlags(true, true);
+      standardized = true;
+      op->setFlags(true, standardized);
       eigs->init();
       nconv = eigs->compute(SortRule::LargestAlge, params.imaxiter, params.itol);
       if (nconv < params.k) cao.error("the nconv is not equal to k.");
@@ -186,13 +207,18 @@ void run_pca_with_arnoldi(Data* data, const Param& params) {
            eigs->eigenvalues().head(nu).array().sqrt())
               .matrix();
 
-      data->calcu_vt_update(U, op->U, op->S, op->VT, true);
+      data->calcu_vt_update(U, op->U, op->S, op->VT, standardized);
+      // S comes from this final solve as well. op->U, op->VT and evals all do,
+      // so keeping the previous iteration's S left .sigvals disagreeing with
+      // .eigvals and with the U/V written beside it.
+      op->S = eigs->eigenvalues().cwiseSqrt();
       op->U = eigs->eigenvectors().leftCols(nu);
       flip_UV(op->U, op->VT);
       evals.noalias() = eigs->eigenvalues() / data->nsnps;
     }
 
-    if (params.ld && !params.pcangsd) data->write_residuals(op->S, op->U, op->VT);
+    // `standardized` is the flag the solve that produced op->U/S/VT ran with
+    data->set_svd_transform(standardized);
     data->write_eigs_files(evals, op->S, op->U, op->VT.transpose());
 
     delete op;

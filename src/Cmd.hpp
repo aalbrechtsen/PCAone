@@ -9,6 +9,7 @@
 using uint = std::uint32_t;
 using uint64 = std::uint64_t;
 
+// BINARY is internal: the shuffled copy of a CSV that -m writes (FileCsv.cpp)
 enum class FileType { PLINK, CSV, BEAGLE, BINARY, BGEN, PGEN };
 
 enum class SvdType { IRAM, PCAoneAlg1, PCAoneAlg2, FULL };
@@ -27,6 +28,7 @@ class Param {
   uint nsamples = 0;
   uint nsnps = 0;
   uint k = 10;
+  uint ref_k = 0;  // leading PCs of the -P/--USV reference used by a two-stage analysis (-k); 0: all
   uint maxp = 20;  // maximum number of power iterations
   uint threads = 12;
   uint bands = 64;
@@ -39,7 +41,7 @@ class Param {
   uint maxiter = 100;
   double alpha = 0.001;
   // can be tol_emu or tol_pcangsd
-  double tolem = 1e-5;
+  double tolem = 1e-6;
   double tolmaf = 1e-6;
   double maf = 0.0;
   // for arnoldi
@@ -48,8 +50,12 @@ class Param {
   double itol = 1e-6;
   // for halko
   uint oversamples = 10;
-  double tol = 1e-4;
+  double tol = 1e-5;
   uint buffer = 2;
+  double perm_mem = 0;  // GiB; > 0 reads the out-of-core BED permutation logically
+  uint perm_chunk = 1;     // --perm-mem: SNPs dealt to a band at a time
+  bool perm_rotate = false;  // --perm-mem: random band rotation per stretch of W chunks
+  bool perm_adapt = false;   // --perm-mem: start with small windows, grow while waiting for I/O
   uint rand = 1;
   // for ld stuff
   bool print_r2 = false;
@@ -57,7 +63,7 @@ class Param {
   std::string filebim;  // the 7-th column can be MAF
   int ld_stats = 0;     // 0: adj; 1: std
   double ld_r2 = 0;
-  bool ld = false;       // true if tolld > 0
+  bool ld = false;       // true for the LD analyses: -R, --ld-r2 and --clump
   uint ld_bp = 1000000;  // base pairs not number of snps
   // for clumping
   std::string clump;
@@ -93,7 +99,6 @@ class Param {
   bool filterSNP = false;  // filter snps
   bool center = true;      // false if G is raw data likelihood or inbred mode
   bool evaladmix = false;  // compute correlation of residuals (evalAdmix)
-  int evaladmix_k = 0;     // PCs used by --evaladmix; 0 means all available
   // for kinship-whitened PCA
   std::string filekin;            // kinship of close relatives, pairs or N x N matrix
   double kin_min = 0.08838834765;  // 2^-3.5, KING lower bound of 2nd degree
@@ -115,6 +120,11 @@ class Param {
   bool pcp_iram = false;
   bool pcp_edge = false;  // aarobust-kin: do not lower the PCP threshold below the GRM noise edge (L stays low rank)  // aarobust-kin: partial eigen-thresholding by IRAM (Spectra) instead of full eigendecompositions
   std::string robust_pcs = "operator";  // operator engine, whitening modes: final PCs by the operator iteration or winSVD (--svd 2)
+  // --evaladmix-kin: the pairs with kinship >= evaladmix_kin, in stripes within
+  // -m, and an unrelated set at evaladmix_unrel (default evaladmix_kin)
+  bool evaladmix_pairs = false;
+  double evaladmix_kin = 0;
+  double evaladmix_unrel = 0;
   // bool estpi = false; // true if output pi is needed
 
   std::ostringstream ss;

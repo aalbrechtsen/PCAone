@@ -1,6 +1,6 @@
 ######################### configure ################
 
-VERSION=0.7.2
+VERSION=0.8.0
 # Detect OS and CPU architecture to add flags conditionally
 Platform        := $(shell uname -s)
 ARCH            := $(shell uname -m)
@@ -140,14 +140,23 @@ endif
 OBJ = src/Arnoldi.o src/Halko.o src/Data.o src/Utils.o src/Cmd.o \
 		src/FileBeagle.o src/FileCsv.o src/FileBgen.o src/FilePlink.o src/FilePgen.o \
 		src/FileBinary.o src/FileUSV.o src/LD.o src/Projection.o \
-		src/InbredSites.o src/InbredSamples.o src/Selection.o src/EvalAdmix.o src/Kinship.o src/Robust.o \
+		src/InbredSites.o src/InbredSamples.o src/Selection.o src/EvalAdmix.o src/Exact.o src/Kinship.o src/Robust.o \
 		src/kfunc.o
+
+# Header dependency tracking. Without it, editing a .hpp does not rebuild the
+# .cpp files that include it, and you silently link stale objects. -MMD writes
+# a .d per object listing the headers it used; -MP adds a phony target for each
+# so a deleted or renamed header does not break the build with "No rule to make
+# target". DEPFLAGS is kept out of CXXFLAGS so the external sub-makes, which are
+# handed CXXFLAGS verbatim, are unaffected.
+DEPFLAGS = -MMD -MP
+DEPS = $(OBJ:.o=.d) src/Main.d
 
 SLIBS += ./external/bgen/bgenlib.a ./external/zstd/lib/libzstd.a  ./external/pgenlib/pgenlib.a
 
 LIBS += $(SLIBS) $(DLIBS) -lpthread -ldl -lm
 
-.PHONY: all clean ibd island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence
+.PHONY: all clean ibd island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence test_em_snp_order test_projection_bootstrap test_cmd_guards test_crash_regressions test_review_fixes test_ref_k test_exact_streaming test_inbreed_samples test_evaladmix test_evaladmix_pairs
 
 all: ${program} pcaone-ibd
 
@@ -160,10 +169,12 @@ pcaone-ibd: src/PcaoneIbd.cpp
 	$(CXX) $(CXXFLAGS) -fopenmp -o pcaone-ibd src/PcaoneIbd.cpp $(INC) $(LDFLAGS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(MYFLAGS) -o $@ -c $< $(INC) $(CPPFLAGS)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(MYFLAGS) -o $@ -c $< $(INC) $(CPPFLAGS)
 
 tests/%.o: tests/%.cpp
-	$(CXX) $(CXXFLAGS) $(MYFLAGS) -o $@ -c $< $(INC) $(CPPFLAGS)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(MYFLAGS) -o $@ -c $< $(INC) $(CPPFLAGS)
+
+-include $(DEPS)
 
 zstdlib:
 	$(MAKE) -C external/zstd/lib lib-nomt
@@ -180,12 +191,46 @@ $(PCALIB): $(OBJ)
 test_pgen_plink_equivalence: ${program}
 	python3 tests/pgen_plink_equivalence.py
 
+test_cmd_guards: ${program}
+	sh tests/test_cmd_guards.sh
+
+test_crash_regressions: ${program}
+	python3 tests/test_crash_regressions.py
+
+test_review_fixes: ${program}
+	python3 tests/test_review_fixes.py
+
+test_ref_k: ${program}
+	python3 tests/test_ref_k.py
+
+test_exact_streaming: ${program}
+	python3 tests/test_exact_streaming.py
+
+test_em_snp_order: ${program}
+	python3 tests/test_em_snp_order.py
+
+test_inbreed_samples: ${program}
+	python3 tests/test_inbreed_samples.py
+
+test_evaladmix: ${program}
+	python3 tests/test_evaladmix.py
+
+test_evaladmix_pairs: ${program}
+	python3 tests/test_evaladmix_pairs.py
+
+test_emu_simulated: ${program}
+	python3 tests/test_emu_simulated.py
+
+test_projection_bootstrap: zstdlib bgenlib pgenlib $(PCALIB) tests/test_projection_bootstrap.o
+	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
+	d=$$(mktemp -d) && ./tests/$@ $$d && rm -rf $$d
+
 rm:
-	(rm -f src/*.o $(program) pcaone-ibd)
+	(rm -f src/*.o src/*.d tests/*.d $(program) pcaone-ibd)
 	(cd ./external/bgen/; $(MAKE) clean)
 
 clean:
-	(rm -f src/*.o $(program) pcaone-ibd)
+	(rm -f src/*.o src/*.d tests/*.d $(program) pcaone-ibd)
 	(cd ./external/bgen/; $(MAKE) clean)
 	(cd ./external/pgenlib/; $(MAKE) clean)
 	(cd ./external/zstd/lib/; $(MAKE) clean)
@@ -197,9 +242,6 @@ data:
 ###################################################################
 #####                   EXAMPLE TESTS
 ###################################################################
-island:
-	./PCAone -b inbreeding/plink-miss0.3 -k 3 -d 0 --emu -o emu -V
-	./PCAone -b inbreeding/plink-miss0.3 -k 3 -d 2 --emu -o emu -V -m 1
 
 example_tests:
 	./PCAone -b example/plink -n 4 -o m0 
@@ -222,55 +264,70 @@ hwe:
 	./PCAone -b example/plink -k 3 -V -m 1
 	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 1 -o m0
 	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 1 -o m1 -m 1
+	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 2 -o m0
+	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 2 -o m1 -m 1
+	diff m0.inbred m1.inbred
 	rm -f m0.* m1.*
 
+# The LD analyses read the genotypes and remove the PCs of -P/--USV as they go.
+# ld_matrix makes those PCs, and checks the .mbim order in-core and out-of-core.
 ld_matrix:
-	./PCAone -b example/plink -k 3 --ld -o adj -d 2
-	./PCAone -b example/plink -k 3 --ld -o pcaone -d 2 -m 1
+	./PCAone -b example/plink -k 3 -V -o adj -d 2
+	./PCAone -b example/plink -k 3 -V -o pcaone -d 2 -m 1
 	diff adj.mbim pcaone.mbim
 	cut -f1 adj.mbim | sort -cn  ## check if sorted
 	awk '$$1==3' adj.mbim | cut -f4 | sort -cn
 	rm -f pcaone.*
 
 ld_r2:
-	./PCAone -B adj.residuals --match-bim adj.mbim --ld-bp 1000 --print-r2 -o adj_r2
-
+	./PCAone -b example/plink -P adj --ld-bp 1000 --print-r2 -o adj_r2 -m 0
+	./PCAone -b example/plink -P adj --ld-bp 1000 --print-r2 -o adj_r2_m1 -m 1
+	gunzip -c adj_r2.ld.gz > adj_r2.ld && gunzip -c adj_r2_m1.ld.gz > adj_r2_m1.ld
+	diff adj_r2.ld adj_r2_m1.ld > /dev/null && rm -f adj_r2.ld adj_r2_m1.ld
 
 ld_prune:
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
 
 ld_clump:
-	./PCAone -B adj.residuals --match-bim adj.mbim --clump example/plink.pheno0.assoc --clump-p1 0.01 --clump-p2 0.05 --clump-r2 0.1 --clump-bp 10000000 -m 0 -o adj_clump_m0
-	./PCAone -B adj.residuals --match-bim adj.mbim --clump example/plink.pheno0.assoc --clump-p1 0.01 --clump-p2 0.05 --clump-r2 0.1 --clump-bp 10000000 -m 1 -o adj_clump_m1
+	./PCAone -b example/plink -P adj --clump example/plink.pheno0.assoc --clump-p1 0.01 --clump-p2 0.05 --clump-r2 0.1 --clump-bp 10000000 -m 0 -o adj_clump_m0
+	./PCAone -b example/plink -P adj --clump example/plink.pheno0.assoc --clump-p1 0.01 --clump-p2 0.05 --clump-r2 0.1 --clump-bp 10000000 -m 1 -o adj_clump_m1
 	diff adj_clump_m0.p0.clump adj_clump_m1.p0.clump > /dev/null
 
 ld_tests:
-	./PCAone -b example/plink -k 3 --ld -o adj -d 0 --maf 0.1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
-	./PCAone -b example/plink -k 3 --ld -o adj -d 0 -m 1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 0 -m 1
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
-	./PCAone -b example/plink -k 3 --ld -o adj -d 1 --maxp 10 --maf 0.1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 1 --maxp 10
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
-	./PCAone -b example/plink -k 3 --ld -o adj -d 1 --maxp 10 -m 1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 1 --maxp 10 -m 1
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
-	./PCAone -b example/plink -k 3 --ld -o adj -d 2 --maf 0.1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 2 -m 1
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m0 -m 0
+	./PCAone -b example/plink -P adj --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_m1 -m 1
 	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
-	./PCAone -b example/plink -k 3 --ld -o adj -d 2 -m 1
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m0 -m 0
-	./PCAone -B adj.residuals --match-bim adj.mbim  --ld-r2 0.8  --ld-bp 1000000 -o adj_prune_m1 -m 1
-	diff adj_prune_m0.ld.prune.out adj_prune_m1.ld.prune.out > /dev/null
+	## the LD sites need not be the PCA sites. --maf is in-core only
+	./PCAone -b example/plink -k 3 -o adj -d 2 --maf 0.1
+	./PCAone -b example/plink -P adj --maf 0.1 --ld-r2 0.8 --ld-bp 1000000 -o adj_prune_maf
+	## the standard LD needs no PCs
+	./PCAone -b example/plink --ld-stats 1 --ld-r2 0.8 --ld-bp 1000000 -o std_prune_m0 -m 0
+	./PCAone -b example/plink --ld-stats 1 --ld-r2 0.8 --ld-bp 1000000 -o std_prune_m1 -m 1
+	diff std_prune_m0.ld.prune.out std_prune_m1.ld.prune.out > /dev/null
+	## PGEN goes through the same LD path
+	./PCAone -p example/plink2 -k 3 -o adjp
+	./PCAone -p example/plink2 -P adjp --ld-r2 0.8 --ld-bp 1000000 -o adjp_prune_m0 -m 0
+	./PCAone -p example/plink2 -P adjp --ld-r2 0.8 --ld-bp 1000000 -o adjp_prune_m1 -m 1
+	diff adjp_prune_m0.ld.prune.out adjp_prune_m1.ld.prune.out > /dev/null
 
 #################################################################
 # CI/CD Test Suites
@@ -292,9 +349,16 @@ example_tests_fast:
 	diff m0.eigvals m1.eigvals
 
 # The fast test suite for aarch64
-test_aarch64: data example_tests_fast hwe ld_matrix ld_r2 ld_prune ld_clump
+test_aarch64: test_cmd_guards test_bed_permutation data example_tests_fast hwe ld_matrix ld_r2 ld_prune ld_clump
 	@echo "SUCCESS: aarch64 fast test suite completed."
 
 # The complete test suite for other architectures like x86_64
-test_full: data example_tests projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests
+test_full: test_cmd_guards test_bed_permutation data example_tests projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests
 	@echo "SUCCESS: Full test suite completed."
+
+.PHONY: test_bed_permutation
+test_bed_permutation: ${program}
+	$(CXX) -std=c++17 -Wall -Wextra tests/test_bed_shuffle.cpp -o tests/test_bed_shuffle
+	./tests/test_bed_shuffle
+	python3 tests/test_bed_permutation.py
+	python3 tests/test_bed_logical_perm.py

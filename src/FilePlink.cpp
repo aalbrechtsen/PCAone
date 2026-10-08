@@ -5,10 +5,31 @@
  ******************************************************************************/
 
 #include "FilePlink.hpp"
+#include "BedShuffle.hpp"
+#include <climits>
+#include <filesystem>
 
 using namespace std;
 
+FileBed::~FileBed() {
+  if (window_reader) {
+    window_reader->finish();
+    cao.print(tick.date(), "logical BED permutation read", window_reader->bytes_read() / 1e9,
+              "GB; waited for I/O", window_reader->wait_seconds(), "seconds; largest window",
+              window_reader->max_bands_per_window(), "bands");
+  }
+}
+
+void FileBed::read_records(uint64 start_idx, uint64 count) {
+  if (window_reader) {
+    window_reader->copy(start_idx, count, inbed.data());
+    return;
+  }
+  bed_ifstream.read(reinterpret_cast<char*>(inbed.data()), bed_bytes_per_snp * count);
+}
+
 void FileBed::check_file_offset_first_var() {
+  if (window_reader) return;  // reads are positioned by the window reader
   setlocale(LC_ALL, "C");
   ios_base::sync_with_stdio(false);
   long long offset = 3 + nsnps * bed_bytes_per_snp;
@@ -33,8 +54,9 @@ void FileBed::read_all() {
   // sometimes no need to estimate AF, e.g. projection
   if (params.dopca && !frequency_was_estimated) {
     F = Mat1D::Zero(nsnps);
+    uint64 nmono = 0;
     // estimate allele frequency first
-#pragma omp parallel for private(i, j, b, c, k, buf)
+#pragma omp parallel for private(i, j, b, c, k, buf) reduction(+ : nmono)
     for (i = 0; i < nsnps; ++i) {
       for (b = 0, c = 0, j = 0; b < bed_bytes_per_snp; ++b) {
         buf = inbed[i * bed_bytes_per_snp + b];
@@ -52,12 +74,11 @@ void FileBed::read_all() {
         F(i) = 0;
       else
         F(i) /= c;
-      // should remove sites with F=0 and 1.0
-      if (F(i) == 0.0 || F(i) == 1.0) cao.warn("sites with MAF=0 found! remove them first! SNP index:", i);
-      // in LD r2,F=0.5 means sample standard deviation is 0
-      if (params.ld && params.verbose > 1 && F(i) == 0.5)
-        cao.warn("sites with MAF=0.5 found in LD estimation. NaN values expected! SNP index:", i);
+      // should remove sites with F=0 and 1.0. counted, not logged here: the
+      // logger is not thread-safe, and one line per site garbled the log
+      if (F(i) == 0.0 || F(i) == 1.0) ++nmono;
     }
+    warn_monomorphic(nmono);
     filter_snps_resize_F();  // filter and resize nsnps
   }
 
@@ -65,7 +86,7 @@ void FileBed::read_all() {
   if (filter) nsnps = keepSNPs.size();
   G = Mat2D::Zero(nsamples, nsnps);  // fill in G with new size after filtering
 
-  if (params.missme) C = ArrBool::Zero(nsnps * nsamples);
+  if (params.missme) C = ArrBool::Zero((uint64)nsnps * nsamples);
   if (params.pcangsd) P = Mat2D::Zero(nsamples * 2, nsnps);
 
 #pragma omp parallel for private(i, j, b, c, k, buf)
@@ -123,7 +144,7 @@ void FileBed::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
   uint actual_block_size = stop_idx - start_idx + 1;
   // check where we are
   long long offset = 3 + start_idx * bed_bytes_per_snp;
-  if (bed_ifstream.tellg() != offset) cao.error("read_block_initial: offset wrong!");
+  if (!window_reader && bed_ifstream.tellg() != offset) cao.error("read_block_initial: offset wrong!");
   // if G is not initial then initial it
   // if actual_block_size is smaller than blocksize, don't resize G;
   if (G.cols() < blocksize || (actual_block_size < blocksize)) {
@@ -133,7 +154,7 @@ void FileBed::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
   uint64 c, b, i, j, k, snp_idx;
   uchar buf;
   // inbed.resize(bed_bytes_per_snp * actual_block_size);
-  bed_ifstream.read(reinterpret_cast<char*>(inbed.data()), bed_bytes_per_snp * actual_block_size);
+  read_records(start_idx, actual_block_size);
   if (!params.dopca) frequency_was_estimated = true;  // read AF from external
   if (frequency_was_estimated) {
 #pragma omp parallel for private(i, j, b, k, snp_idx, buf)
@@ -162,10 +183,15 @@ void FileBed::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
     }
   } else {
     // estimate allele frequencies
-#pragma omp parallel for private(c, i, j, b, k, snp_idx, buf)
+    if (start_idx == 0) nmono_seen = 0;  // a pass over the blocks restarted before F was complete
+    uint64 nmono = 0;
+#pragma omp parallel for private(c, i, j, b, k, snp_idx, buf) reduction(+ : nmono)
     for (i = 0; i < actual_block_size; ++i) {
       snp_idx = start_idx + i;
       c = 0;
+      // start from 0: the LD code may read a block again before the pass that
+      // estimates F has reached the last block, e.g. clumping several files
+      F(snp_idx) = 0.0;
       for (b = 0, j = 0; b < bed_bytes_per_snp; ++b) {
         buf = inbed[i * bed_bytes_per_snp + b];
         for (k = 0; k < 4; ++k, ++j) {
@@ -186,10 +212,7 @@ void FileBed::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
         F(snp_idx) /= c;
       }
       // should remove sites with F=0 and 1.0
-      if (F(snp_idx) == 0.0 || F(snp_idx) == 1.0) cao.warn("sites with MAF=0 found! remove them first!");
-      // in LD r2,F=0.5 means sample standard deviation is 0
-      if (params.ld && params.verbose > 1 && F(snp_idx) == 0.5)
-        cao.warn("MAF for site ", snp_idx, "is 0.5. NaN values expected in calculating LD R2.");
+      if (F(snp_idx) == 0.0 || F(snp_idx) == 1.0) ++nmono;
       // do centering and initialing
       centered_geno_lookup(1, snp_idx) = 0.0;                       // missing
       centered_geno_lookup(0, snp_idx) = BED2GENO[0] - F(snp_idx);  // minor hom
@@ -212,9 +235,13 @@ void FileBed::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
         }
       }
     }
+    nmono_seen += nmono;
   }
 
-  if (stop_idx + 1 == nsnps) frequency_was_estimated = true;
+  if (stop_idx + 1 == nsnps && !frequency_was_estimated) {
+    frequency_was_estimated = true;
+    warn_monomorphic(nmono_seen);
+  }
 }
 
 void FileBed::read_block_update(
@@ -225,11 +252,11 @@ void FileBed::read_block_update(
     inbed.resize(bed_bytes_per_snp * blocksize);
   }
   // check where we are
-  if (params.verbose) {
+  if (params.verbose && !window_reader) {
     long long offset = 3 + start_idx * bed_bytes_per_snp;
     if (bed_ifstream.tellg() != offset) cao.error("read_block_initial: offset wrong!");
   }
-  bed_ifstream.read(reinterpret_cast<char*>(inbed.data()), bed_bytes_per_snp * actual_block_size);
+  read_records(start_idx, actual_block_size);
   uint64 b, i, j, snp_idx;
   uint ks = svals.rows();
   uint ki, k;
@@ -297,112 +324,155 @@ void FileBed::read_block_update(
   }
 }
 
-// structured permutation with cached buffer
-// TODO: support MAF filters
-// TODO: support --exclude
-PermMat permute_plink(std::string& fin, const std::string& fout, uint gb, uint nbands) {
-  uint nsnps = count_lines(fin + ".bim");
-  uint nsamples = count_lines(fin + ".fam");
-  uint bed_bytes_per_snp = (nsamples + 3) >> 2;
-  cao.print(tick.date(), "permute plink files. nsnps:", nsnps, ", nsamples:", nsamples);
+void FileBed::apply_permutation(Param& config) {
+  // winSVD changes Omg only between -w bands of bandFactor blocks, so the
+  // order within a band is free (BedShuffle.hpp). One bucket per band keeps
+  // the writes large; one per block would shrink them as the file grows.
+  const uint64 bucket = (uint64)blocksize * bandFactor;
+  perm = permute_plink(config.filein, config.fileout, config.buffer, bucket, config.seed);
+  bed_ifstream.close();
+  bed_ifstream.clear();
+  bed_ifstream.open(config.filein + ".bed", std::ios::binary);
+  bed_ifstream.seekg(3);
+  if (!bed_ifstream) throw std::runtime_error("Cannot reopen permuted BED file");
+}
 
-  // calculate the readin number of snps of certain big buffer like 2GB.
-  // must be a multiple of nbands.
-  uint twoGB_snps = (uint)floor((double)1073741824 * gb / bed_bytes_per_snp);
-  if (twoGB_snps > nsnps) twoGB_snps = nsnps;
-  uint bufsize = (uint)floor((double)twoGB_snps / nbands);
-  twoGB_snps = bufsize * nbands;  // initially twoGB_snps is a multiple of nbands
-  assert(nsnps >= twoGB_snps);
-  uint nblocks = (nsnps + twoGB_snps - 1) / twoGB_snps;
-  uint modr2 = nsnps % twoGB_snps;
-  uint64 bed_bytes_per_block = bed_bytes_per_snp * twoGB_snps;
-  vector<uchar> inbed;  // keep the input buffer
-  inbed.resize(bed_bytes_per_block);
-  vector<uchar> outbed;  // keep the output buffer
-  uint64 out_bytes_per_block = bed_bytes_per_snp * bufsize;
-  outbed.resize(out_bytes_per_block);
-
-  // get index of first snp of each band
-  vector<uint64> bandidx;
-  bandidx.resize(nbands);
-  uint modr = nsnps % nbands;
-  uint bandsize = (nsnps + nbands - 1) / nbands;
-  if (modr == 0) {
-    for (uint i = 0; i < nbands; ++i) {
-      bandidx[i] = i * bandsize;
-    }
-  } else {
-    for (uint i = 0; i < nbands; ++i) {
-      if (i < modr) {
-        bandidx[i] = i * bandsize;
-      } else {
-        bandidx[i] = modr * bandsize + (bandsize - 1) * (i - modr);
-      }
+void FileBed::apply_logical_permutation(const Param& config) {
+  const uint64 W = config.bands, M = nsnps, width = bed_bytes_per_snp;
+  if (M > UINT32_MAX) cao.error("too many SNPs for the logical BED permutation");
+  // winSVD updates Omg after every bandFactor blocks, i.e. at multiples of
+  // bucket SNPs. Band b is the logical SNPs [b * bucket, (b + 1) * bucket)
+  // (only the last band is short), so the blocks keep their uniform size.
+  const uint64 bucket = (uint64)blocksize * bandFactor;
+  std::vector<uint64_t> band_start(W + 1);
+  std::vector<uint64> capacity(W);
+  for (uint64 b = 0; b <= W; ++b) band_start[b] = std::min(M, b * bucket);
+  for (uint64 b = 0; b < W; ++b) capacity[b] = band_start[b + 1] - band_start[b];
+  if (band_start[W] != M) cao.error("BUG: -w bands do not cover the SNPs");
+  // Chunks of c source SNPs are dealt to the bands in turn; chunk t of stretch i
+  // (W chunks) goes to band (t + r_i) mod W, r_i = 0 or random with
+  // --perm-rotate. A full band passes its share on to the next one.
+  const uint64 c = std::max<uint>(1, config.perm_chunk);
+  PortableRng rng(config.seed);
+  std::vector<uint64> fill(W, 0);
+  std::vector<uint32_t> order(M);
+  for (uint64 j = 0, t = 0, r = 0; j < M; ++t) {
+    if (t % W == 0) r = config.perm_rotate ? rng.below(W) : 0;
+    uint64 b = (t % W + r) % W, n = std::min<uint64>(c, M - j);
+    while (n) {
+      while (fill[b] == capacity[b]) b = (b + 1) % W;
+      const uint64 take = std::min<uint64>(n, capacity[b] - fill[b]);
+      for (uint64 i = 0; i < take; ++i) order[band_start[b] + fill[b]++] = (uint32_t)j++;
+      n -= take;
     }
   }
 
-  ios_base::sync_with_stdio(false);
-  std::ifstream in(fin + ".bed", std::ios::binary);
-  std::ofstream out(fout + ".perm.bed", std::ios::binary);
-  if (!in.is_open()) cao.error("Cannot open bed file.");
-  uchar header[3];
-  in.read(reinterpret_cast<char*>(&header[0]), 3);
-  if ((header[0] != 0x6c) || (header[1] != 0x1b) || (header[2] != 0x01))
+  // windows of k bands; two are held while the next one loads, or the whole BED
+  const uint64 budget = (uint64)(config.perm_mem * 1073741824.0);
+  const uint64 band_bytes = (M + W - 1) / W * width;
+  uint64 kmax = W;
+  if (M * width > budget) kmax = std::max<uint64>(1, std::min<uint64>(W, budget / 2 / band_bytes));
+  // --perm-adapt: the smallest k whose contiguous reads (k chunks) reach 256 KiB
+  uint64 k = kmax;
+  if (config.perm_adapt) k = std::min<uint64>(kmax, std::max<uint64>(1, (262144 + c * width - 1) / (c * width)));
+  const int io_threads = 32;  // concurrent preads; mostly waiting on the disk
+  window_reader = std::make_unique<PCAone::BedWindowReader>(
+      config.filein + ".bed", width, order, band_start, k, kmax, config.perm_adapt, io_threads,
+      [](const std::string& msg) { cao.print(tick.date(), "--perm-adapt:", msg); });
+  if (config.verbose >= 3) {  // the logical order, for checking
+    std::ofstream idx(config.fileout + ".perm.idx");
+    for (uint64 d = 0; d < M; ++d) idx << order[d] << "\n";
+  }
+
+  Eigen::VectorXi indices(M);
+  for (uint64 d = 0; d < M; ++d) indices(d) = (int)order[d];
+  perm = PermMat(indices);
+  logical_bed_perm = true;
+  cao.print(tick.date(), "interleaved -w bands read logically from the input BED (no .perm.bed); chunk =", c,
+            "SNPs, rotate =", config.perm_rotate, ", window =", k, "of", W, "bands (max", kmax, "),",
+            (double)(kmax < W ? 2 : 1) * band_bytes * kmax / 1073741824.0, "GiB at most, contiguous reads of",
+            k * c, "SNPs (", k * c * width / 1024.0, "KiB )");
+}
+
+namespace {
+// true if `path` exists and is the same file as `input`, through any spelling,
+// symlink or hard link. "-b ./x.perm -o x" truncated the input before.
+bool same_file(const std::string& input, const std::string& path) {
+  std::error_code ec;
+  return std::filesystem::exists(path, ec) && std::filesystem::equivalent(input, path, ec);
+}
+
+// Removes the permuted files this run created unless it finished writing them.
+struct PermOutputGuard {
+  std::vector<std::string> created;
+  bool done = false;
+  ~PermOutputGuard() {
+    if (done) return;
+    std::error_code ec;
+    for (const auto& path : created) std::filesystem::remove(path, ec);
+  }
+};
+}  // namespace
+
+PermMat permute_plink(std::string& fin, const std::string& fout, uint gb, uint64 bucket, int seed) {
+  const uint64 nsnps = count_lines(fin + ".bim");
+  const uint64 nsamples = count_lines(fin + ".fam");
+  if (!nsnps || !nsamples || nsnps > INT_MAX || !gb || !bucket)
+    cao.error("Invalid dimensions or buffer for BED permutation.");
+  const uint64 width = (nsamples + 3) / 4;
+  const uint64 budget = uint64(gb) * 1073741824ULL;
+  if (budget / 2 < width) cao.error("--buffer must hold two SNP records for the BED permutation.");
+  const uint64 bytes = nsnps * width + 3;
+  std::ifstream in(fin + ".bed", std::ios::binary | std::ios::ate);
+  if (!in || in.tellg() != static_cast<std::streamoff>(bytes))
+    cao.error("BED size does not match BIM/FAM dimensions.");
+  in.seekg(0);
+  char header[3];
+  in.read(header, 3);
+  if (!in || header[0] != 0x6c || header[1] != 0x1b || header[2] != 0x01)
     cao.error("Incorrect magic number in plink bed file.");
-  out.write(reinterpret_cast<char*>(&header[0]), 3);
-  std::ifstream in_bim(fin + ".bim", std::ios::in);
-  std::ofstream out_bim(fout + ".perm.bim", std::ios::out);
-  vector<std::string> bims(std::istream_iterator<Line>{in_bim}, std::istream_iterator<Line>{});
-  vector<std::string> bims2;
-  bims2.resize(nsnps);
-  uint64 ia, ib, b, i, j, twoGB_snps2, idx, bufidx = bufsize;
-  Eigen::VectorXi indices(nsnps);
-  for (i = 0; i < nblocks; i++) {
-    if (i == nblocks - 1 && modr2 != 0) {
-      twoGB_snps2 = nsnps - (nblocks - 1) * twoGB_snps;
-      bed_bytes_per_block = bed_bytes_per_snp * twoGB_snps2;
-      inbed.resize(bed_bytes_per_block);
-      // in last block, twoGB_snps is not neccessary a multiple of nbands and
-      // smaller than the previous
-      bufsize = (uint64)(twoGB_snps2 + nbands - 1) / nbands;
-      modr2 = twoGB_snps2 % nbands;
-      out_bytes_per_block = bed_bytes_per_snp * bufsize;
-      outbed.resize(out_bytes_per_block);
-    }
-    in.read(reinterpret_cast<char*>(&inbed[0]), bed_bytes_per_block);
-    for (b = 0; b < nbands; b++) {
-      idx = 3 + (i * bufidx + bandidx[b]) * bed_bytes_per_snp;
-      for (j = 0; j < bufsize - 1; j++) {
-        std::copy(inbed.begin() + (j * nbands + b) * bed_bytes_per_snp,
-                  inbed.begin() + (j * nbands + b + 1) * bed_bytes_per_snp, outbed.begin() + j * bed_bytes_per_snp);
-        // cout << i * twoGB_snps + j * nbands + b << endl;
-        ia = i * twoGB_snps + j * nbands + b;
-        ib = i * bufidx + bandidx[b] + j;
-        bims2[ib] = bims[ia];
-        indices(ib) = ia;
-      }
-      if (i != nblocks - 1 || (i == nblocks - 1 && b < modr2) || modr2 == 0) {
-        std::copy(inbed.begin() + (j * nbands + b) * bed_bytes_per_snp,
-                  inbed.begin() + (j * nbands + b + 1) * bed_bytes_per_snp, outbed.begin() + j * bed_bytes_per_snp);
-        ia = i * twoGB_snps + j * nbands + b;
-        ib = i * bufidx + bandidx[b] + j;
-        bims2[ib] = bims[ia];
-        indices(ib) = ia;
-      } else {
-        out_bytes_per_block = bed_bytes_per_snp * (bufsize - 1);
-      }
-      out.seekp(idx, std::ios_base::beg);
-      out.write(reinterpret_cast<char*>(&outbed[0]), out_bytes_per_block);
-    }
-  }
-  in.close();
+  const std::string prefix = fout + ".perm";
+  for (const char* suffix : {".bed", ".bim", ".fam"})
+    if (same_file(fin + suffix, prefix + suffix))
+      cao.error("the permuted " + prefix + suffix + " would overwrite the input. please use another -o.");
+
+  // the same generator as the in-core, PGEN, BGEN and CSV shuffles: std::shuffle
+  // gave a different order for the same --seed on libc++ (macOS) and libstdc++
+  std::vector<uint32_t> order(nsnps);
+  std::iota(order.begin(), order.end(), 0);
+  PortableRng rng(seed);
+  portable_shuffle(order.begin(), order.end(), rng);
+  cao.print(tick.date(), "shuffle SNPs into random -w bands; seed:", seed, ", SNPs per band:", bucket);
+
+  PermOutputGuard guard;
+  std::ofstream out(prefix + ".bed", std::ios::binary);
+  if (!out) throw std::runtime_error("Cannot open " + prefix + ".bed");
+  guard.created.push_back(prefix + ".bed");
+  out.write(header, 3);
+  PCAone::rewrite_bed_buckets(in, out, order, width, budget, bucket);
   out.close();
+  if (!out) throw std::runtime_error("Cannot finish permuted BED file");
 
-  std::ifstream in_fam(fin + ".fam");
-  std::ofstream out_fam(fout + ".perm.fam");
-  out_fam << in_fam.rdbuf();
-  fin = fout + ".perm";
-
-  for (auto b : bims2) out_bim << b << "\n";
+  std::ifstream bim(fin + ".bim");
+  std::vector<std::string> lines(std::istream_iterator<Line>{bim}, std::istream_iterator<Line>{});
+  if (lines.size() != nsnps) throw std::runtime_error("Cannot read BIM during permutation");
+  std::ofstream out_bim(prefix + ".bim");
+  if (!out_bim) throw std::runtime_error("Cannot open " + prefix + ".bim");
+  guard.created.push_back(prefix + ".bim");
+  Eigen::VectorXi indices(nsnps);
+  for (uint64 d = 0; d < nsnps; ++d) {
+    indices(d) = order[d];
+    out_bim << lines[order[d]] << "\n";
+  }
+  out_bim.close();
+  std::ifstream fam(fin + ".fam", std::ios::binary);
+  std::ofstream out_fam(prefix + ".fam", std::ios::binary);
+  if (!out_fam) throw std::runtime_error("Cannot open " + prefix + ".fam");
+  guard.created.push_back(prefix + ".fam");
+  out_fam << fam.rdbuf();
+  out_fam.close();
+  if (!out_bim || !fam || !out_fam) throw std::runtime_error("Cannot write permuted BED metadata");
+  guard.done = true;
+  fin = prefix;
   return PermMat(indices);
 }

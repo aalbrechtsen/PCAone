@@ -52,25 +52,100 @@ Mat1D minSSE(const Mat2D& X, const Mat2D& Y);
 
 double mev(const Mat2D& X, const Mat2D& Y);
 
+// out = X' * Y for a wide X (samples x sites) and a thin Y, so out is tall.
+// Eigen's multithreaded GEMM packs a kc x X.cols() panel of X' for a tall
+// result, up to min(n, 256) * m doubles: nearly a second copy of X when n is
+// small. Column panels of X, one thread each, need a few MB and run 2-4x
+// faster. Every row of out comes from one panel, over the whole of n, so the
+// result does not depend on the number of threads.
+void mul_Xt_Y(const Eigen::Ref<const Mat2D>& X, const Eigen::Ref<const Mat2D>& Y, Eigen::Ref<Mat2D> out);
+
+// K += X * X' on the lower triangle of the square K (the strict upper triangle
+// is left untouched), for X of K.rows() x b. Eigen's rankUpdate runs on one
+// thread and its GEMM does twice the flops, so the lower triangle is cut into
+// tiles, each its own GEMM on one thread. A BLAS build hands it to ?syrk.
+void syrk_lower_add(Eigen::Ref<Mat2D> K, const Eigen::Ref<const Mat2D>& X);
+
+// copy the strict lower triangle of the square K onto its upper triangle
+void mirror_lower(Eigen::Ref<Mat2D> K);
+
+// Call f(j, x) for j in [0, count), where x is column `first + j` of A * B
+// (A is n x k, B is k x m). The product is formed a panel of ~1 MB at a time in
+// a thread-local buffer: one GEMM per panel in place of the scalar triple loops
+// the reconstructions U * S * V' were written as. Runs in parallel over panels.
+template <typename DerivedB, typename Func>
+void for_each_product_column(
+    const Mat2D& A, const Eigen::MatrixBase<DerivedB>& B, Eigen::Index first, Eigen::Index count, Func f) {
+  const Eigen::Index bs = std::max<Eigen::Index>(1, (Eigen::Index(1) << 17) / std::max<Eigen::Index>(1, A.rows()));
+  const Eigen::Index nb = (count + bs - 1) / bs;
+#pragma omp parallel
+  {
+    Mat2D panel;
+#pragma omp for schedule(static)
+    for (Eigen::Index b = 0; b < nb; ++b) {
+      const Eigen::Index c = b * bs, w = std::min<Eigen::Index>(bs, count - c);
+      panel.noalias() = A * B.middleCols(first + c, w);
+      for (Eigen::Index t = 0; t < w; ++t) f(c + t, panel.col(t));
+    }
+  }
+}
+
 void mev_rmse_byk(const Mat2D& X, const Mat2D& Y, Mat1D& Vm, Mat1D& Vr);
 
 String1D split_string(const std::string& s, const std::string& separators);
 
+// the EM-PCA loops ran out of --maxiter without a word
+template <typename P>
+void warn_em_not_converged(const P& params, double diff) {
+  cao.warn("EM-PCA did not converge in --maxiter " + std::to_string(params.maxiter) +
+           " iterations (diff = " + std::to_string(diff) + ", --tol-em = " + std::to_string(params.tolem) + ")");
+}
+
+// Median of a buffer the caller is done with: reorders it in place.
+//
+// std::nth_element is O(n) where std::sort is O(n log n), and the value is
+// identical -- after nth_element every element below `mid` is <= v[mid], so the
+// largest of them is the other central order statistic. robust_cov_gk() calls
+// this millions of times, so the difference is the runtime of --selection 2.
 template <typename T>
-auto get_median(std::vector<T> v) {
+auto median_inplace(std::vector<T>& v) {
   static_assert(!std::is_same_v<T, bool>, "Boolean type is not supported");
 
   if (v.empty()) {
     throw std::invalid_argument("Cannot calculate median of an empty vector");
   }
 
-  std::sort(v.begin(), v.end());
-  size_t n = v.size();
-  if (n % 2 == 0) {
-    return (v[n / 2 - 1] + v[n / 2]) / static_cast<T>(2);
-  } else {
-    return v[n / 2];
+  const size_t n = v.size();
+  const size_t mid = n / 2;
+  std::nth_element(v.begin(), v.begin() + mid, v.end());
+  if (n % 2 != 0) return v[mid];
+  const T lo = *std::max_element(v.begin(), v.begin() + mid);
+  return static_cast<T>((lo + v[mid]) / static_cast<T>(2));
+}
+
+template <typename T>
+auto get_median(std::vector<T> v) {
+  return median_inplace(v);
+}
+
+// Write a matrix as tab-separated rows, NA for a non-finite value. Finite
+// values come out byte for byte as Eigen::IOFormat(6, DontAlignCols, "\t", "\n")
+// prints them; that prints a NaN as "nan", which R does not read as missing.
+template <typename Derived>
+void write_rows(std::ostream& os, const Eigen::DenseBase<Derived>& M) {
+  const std::streamsize old = os.precision(6);
+  for (Eigen::Index i = 0; i < M.rows(); ++i) {
+    for (Eigen::Index j = 0; j < M.cols(); ++j) {
+      if (j) os << '\t';
+      const double v = M(i, j);
+      if (std::isfinite(v))
+        os << v;
+      else
+        os << "NA";
+    }
+    os << '\n';
   }
+  os.precision(old);
 }
 
 void make_plink2_eigenvec_file(int K, std::string fout, const std::string& fin, const std::string& fam);
@@ -80,7 +155,21 @@ bool isZstdCompressed(const char* filename);
 
 Mat2D read_usv(const std::string& path);
 
-void read_sigvals(const std::string& path, uint& N, uint& M, Mat1D& S);
+// How the matrix that a PCA decomposed relates to the 0..1 allele-frequency
+// scale, recorded in .sigvals so that -P/--USV can invert U*S*V' later.
+//
+// Nothing in .eigvecs/.sigvals/.loadings used to say this, so --inbreed had to
+// assume the reference run used the defaults. It does not always: --missme
+// without --emu leaves the final decomposition unstandardised, and the pcangsd
+// path decomposes centred *dosages* rather than PCAone's 0..1 coding.
+struct UsvTransform {
+  bool known = false;                     // false for a .sigvals written before this was recorded
+  int scale = SCALE_STANDARDIZE_GENETIC;  // scaling actually applied: -9 standardised, 0 none
+  int ploidy = 2;                         // ploidy of the reference run
+  int gscale = 1;                         // 1: genotypes coded 0..1; 2: dosages coded 0..2
+};
+
+void read_sigvals(const std::string& path, uint& N, uint& M, Mat1D& S, UsvTransform* transform = nullptr);
 
 Mat1D read_eigvals(const std::string& path);
 
@@ -110,6 +199,14 @@ void parse_beagle_file(Mat2D& P, gzFile fp, const int nsamples, const int nsnps)
 String1D parse_beagle_samples(const std::string& fin);
 
 void write_eigvecs2_beagle(const Mat2D& U, const std::string& fin, const std::string& fout);
+
+// .cov and .eigvecs2 of the PCAngsd path: the covariance of the standardized
+// expected genotypes E with its corrected diagonal Dc, and its top -k eigenvectors
+class Param;
+// the number of leading reference PCs a two-stage analysis (-P/--USV) uses: -k
+// when it was given, else all `navail` PCs in `path`. refuses a -k above navail.
+int ref_pcs(const Param& params, int navail, const std::string& path);
+void write_pcangsd_cov(const Mat2D& E, const Mat1D& Dc, uint nsnps, const Param& params);
 
 /// return the p-value of 1-degreed chi-squared
 double chisq1d(const double x);
@@ -169,6 +266,9 @@ double pchisq(double x, int df, bool lower_tail);
 double qchisq(double p, int df);
 
 void galinsky_selection_stat(Mat2D& V);
-void pcadapt_selection_stats(const Mat2D& Z, Mat1D& stat, Mat1D& chi2_stat, Mat1D& pval, double& gif);
+// `keep[i] == 0` marks a site with no residual variance: it is left out of the
+// robust fit and the inflation factor, and its outputs come back as NaN.
+void pcadapt_selection_stats(const Mat2D& Z, const std::vector<char>& keep, Mat1D& stat, Mat1D& chi2_stat,
+                             Mat1D& pval, double& gif);
 
 #endif  // PCAONE_UTILES_

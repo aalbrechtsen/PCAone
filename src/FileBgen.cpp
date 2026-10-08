@@ -19,7 +19,7 @@ void FileBgen::read_all() {
   if (!params.pcangsd) {
     F = Mat1D::Zero(nsnps);
     G = Mat2D::Zero(nsamples, nsnps);
-    if (params.missme) C = ArrBool::Zero(nsnps * nsamples);
+    if (params.missme) C = ArrBool::Zero((uint64)nsnps * nsamples);
     for (j = 0, k = 0; j < nsnps; j++) {
       try {
         auto var = bg->next_var();
@@ -47,7 +47,7 @@ void FileBgen::read_all() {
         for (i = 0; i < nsamples; i++) {
           if (std::isnan(dosages[i])) {
             G(i, k) = 0;
-            if (params.missme) C[k * nsamples + i] = 1;
+            if (params.missme) C[(uint64)k * nsamples + i] = 1;
           } else {
             G(i, k) = dosages[i] / 2.0 - F(k);  // map to [0, 1];
           }
@@ -65,7 +65,7 @@ void FileBgen::read_all() {
     nsnps = k;  // resize nsnps;
     G.conservativeResize(Eigen::NoChange, nsnps);
     F.conservativeResize(nsnps);
-    C.conservativeResize(nsnps * nsamples);
+    if (params.missme) C.conservativeResize((uint64)nsnps * nsamples);
   } else {
     // read all GP data into P;
     for (j = 0; j < nsnps; j++) {
@@ -179,7 +179,7 @@ void permute_bgen_thread(std::vector<int> idx, std::string fin, std::string fout
   }
 }
 
-PermMat permute_bgen(std::string& fin, std::string fout, int nthreads) {
+PermMat permute_bgen(std::string& fin, std::string fout, int nthreads, int seed) {
   cao.print(tick.date(), "begin to permute BGEN file");
   bgen::CppBgenReader br(fin, "", true);
   uint nsnps = br.header.nvariants;
@@ -188,8 +188,8 @@ PermMat permute_bgen(std::string& fin, std::string fout, int nthreads) {
                          br.samples.samples);
   vector<int> perm(nsnps);
   std::iota(perm.begin(), perm.end(), 0);
-  auto rng = std::default_random_engine{};
-  std::shuffle(perm.begin(), perm.end(), rng);
+  PortableRng rng(seed);  // --seed; it was default-seeded
+  portable_shuffle(perm.begin(), perm.end(), rng);
   vector<std::thread> threads;
   uint tn = (nsnps + nthreads - 1) / nthreads;  // evenly spread index
   for (int i = 0; i < nthreads; i++) {

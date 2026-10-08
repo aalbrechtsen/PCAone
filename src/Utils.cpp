@@ -6,13 +6,16 @@
 
 #include "Utils.hpp"
 
+#include <omp.h>
 #include <sys/utsname.h>
 
 #include <cstddef>
 #include <cstdlib>  // strtod
 #include <cstring>  // strtok_r
 #include <fstream>
+#include <memory>
 
+#include "Cmd.hpp"
 #include "Common.hpp"
 #include "kfunc.h"
 
@@ -191,6 +194,71 @@ Mat1D minSSE(const Mat2D& X, const Mat2D& Y) {
   return res;
 }
 
+void mul_Xt_Y(const Eigen::Ref<const Mat2D>& X, const Eigen::Ref<const Mat2D>& Y, Eigen::Ref<Mat2D> out) {
+  const Eigen::Index m = X.cols();
+  // ~2 MB of X per panel, and at least 64 columns
+  const Eigen::Index bs = std::max<Eigen::Index>(64, (Eigen::Index(1) << 18) / std::max<Eigen::Index>(1, X.rows()));
+  const Eigen::Index nb = (m + bs - 1) / bs;
+#pragma omp parallel for schedule(static)
+  for (Eigen::Index b = 0; b < nb; ++b) {
+    const Eigen::Index c = b * bs, w = std::min(bs, m - c);
+    out.middleRows(c, w).noalias() = X.middleCols(c, w).transpose() * Y;
+  }
+}
+
+void syrk_lower_add(Eigen::Ref<Mat2D> K, const Eigen::Ref<const Mat2D>& X) {
+  const Eigen::Index n = K.rows(), m = X.cols();
+  if (n == 0 || m == 0) return;
+#ifdef EIGEN_USE_BLAS
+  K.selfadjointView<Eigen::Lower>().rankUpdate(X);  // ?syrk, threaded by the BLAS
+#else
+  // Tiles of the lower triangle, 256 rows each (one tile up to n = 512). When
+  // there are fewer than 2 tiles per thread, the sites are also split into D
+  // chunks, each added into its own copy of K (at most 1 GB of copies) and
+  // summed at the end: a few large products run faster than many small ones.
+  const Eigen::Index T = omp_get_max_threads();
+  const Eigen::Index ts = n <= 512 ? n : 256;
+  const Eigen::Index nt = (n + ts - 1) / ts, ntiles = nt * (nt + 1) / 2;
+  const Eigen::Index D = std::max<Eigen::Index>(
+      1, std::min<Eigen::Index>({T, (2 * T + ntiles - 1) / ntiles, 1 + (Eigen::Index(1) << 27) / (n * n), m / 256}));
+  // chunk 0 goes into K itself. not Kd(D - 1, Mat2D::Zero(n, n)): its fill
+  // value is an n x n temporary even when D = 1, a second N x N matrix at the
+  // peak of the dense --evaladmix and of the exact PCA
+  std::vector<Mat2D> Kd(D - 1);
+  for (auto& Kc : Kd) Kc.setZero(n, n);
+#pragma omp parallel for schedule(dynamic, 1)
+  for (Eigen::Index task = 0; task < ntiles * D; ++task) {
+    const Eigen::Index t = task % ntiles, d = task / ntiles;
+    // t -> tile (i, j), j <= i, row by row of the triangle of tiles
+    Eigen::Index i = (Eigen::Index)((std::sqrt(8.0 * t + 1) - 1) / 2);
+    while (i * (i + 1) / 2 > t) --i;
+    while ((i + 1) * (i + 2) / 2 <= t) ++i;
+    const Eigen::Index j = t - i * (i + 1) / 2;
+    const Eigen::Index r = i * ts, h = std::min(ts, n - r), c = j * ts, w = std::min(ts, n - c);
+    const Eigen::Index c0 = m * d / D, c1 = m * (d + 1) / D;
+    const auto Xd = X.middleCols(c0, c1 - c0);
+    Eigen::Map<Mat2D, 0, Eigen::OuterStride<>> Kt(d == 0 ? K.data() : Kd[d - 1].data(), n, n,
+                                                  Eigen::OuterStride<>(d == 0 ? K.outerStride() : n));
+    if (i == j)
+      Kt.block(r, r, h, h).selfadjointView<Eigen::Lower>().rankUpdate(Xd.middleRows(r, h));
+    else
+      Kt.block(r, c, h, w).noalias() += Xd.middleRows(r, h) * Xd.middleRows(c, w).transpose();
+  }
+  if (D > 1) {
+#pragma omp parallel for schedule(dynamic, 16)
+    for (Eigen::Index j = 0; j < n; ++j)
+      for (const auto& Q : Kd) K.col(j).tail(n - j) += Q.col(j).tail(n - j);
+  }
+#endif
+}
+
+void mirror_lower(Eigen::Ref<Mat2D> K) {
+  const Eigen::Index n = K.rows();
+#pragma omp parallel for schedule(dynamic, 64)
+  for (Eigen::Index j = 1; j < n; ++j)
+    for (Eigen::Index i = 0; i < j; ++i) K(i, j) = K(j, i);
+}
+
 double mev(const Mat2D& X, const Mat2D& Y) {
   double res = 0;
   for (Eigen::Index i = 0; i < X.cols(); ++i) {
@@ -325,16 +393,34 @@ Mat2D read_usv(const std::string& path) {
 }
 
 // parse .sigvals file
-void read_sigvals(const std::string& path, uint& N, uint& M, Mat1D& S) {
+//
+// header is  #nsamples,nsnps[,key=value]...
+// The key=value fields were added later; std::stoi stops at the next comma, so
+// an older PCAone reads a newer file correctly and simply ignores them, and a
+// newer PCAone reading an older file just finds none.
+void read_sigvals(const std::string& path, uint& N, uint& M, Mat1D& S, UsvTransform* transform) {
   double val;
   Double1D V;
   std::ifstream fin(path);
+  if (!fin.is_open()) cao.error("can not open the singular values file\n => " + path);
   std::string line;
   getline(fin, line);
   // parse line #nsamples,nsnps
   size_t comma = line.find(',');
   N = std::stoi(line.substr(1, comma - 1));
   M = std::stoi(line.substr(comma + 1));
+  if (transform != nullptr) {
+    for (const auto& tok : split_string(line, ",")) {
+      const size_t eq = tok.find('=');
+      if (eq == std::string::npos) continue;
+      const std::string key = tok.substr(0, eq), val_s = tok.substr(eq + 1);
+      if (key == "scale") transform->scale = std::stoi(val_s);
+      else if (key == "ploidy") transform->ploidy = std::stoi(val_s);
+      else if (key == "gscale") transform->gscale = std::stoi(val_s);
+      else continue;
+      transform->known = true;
+    }
+  }
   // parse the rest
   while (getline(fin, line)) {
     val = std::stod(line);
@@ -359,28 +445,39 @@ Mat1D read_eigvals(const std::string& path) {
 // parse .eigvecs or .loadings file assume rows and cols are known
 Mat2D read_eigvecs(const std::string& path, int n, int k) {
   cao.print(tick.date(), "read matrix from " + path);
-  Mat2D M(n, k);
-  const char sep = '\t';
-  bool is_seperator[256] = {false};
-  is_seperator[(unsigned int)sep] = true;
-  int begin{0}, j{0}, i{0}, k1{0};
-  std::ifstream fin(path);
-  std::string line;
-  while (std::getline(fin, line)) {
-    const char* p = line.c_str();
-    for (begin = 0, k1 = 0, i = 0; k1 < k; i++) {
-      if (is_seperator[(uint8_t)line[i]] || i == (int)line.size()) {
-        char* end;
-        M(j, k1) = std::strtod(p + begin, &end);
-        begin = i + 1;
-        k1++;
-      }
-    }
-    if (k1 != k) cao.error("the number of columns is not alignd with K!\n =>" + path);
-    j++;
-  }
+  if (n <= 0 || k <= 0) cao.error("read_eigvecs: asked for a ", n, " x ", k, " matrix from ", path);
 
-  if (j != n) cao.error("the number of rows differs from the input!\n =>" + path);
+  std::ifstream fin(path);
+  if (!fin.is_open()) cao.error("can not open ", path);
+
+  // Every bound is checked BEFORE the write it guards. The previous version
+  // filled M(j, k1) for every line in the file and only compared j with n after
+  // the loop, so a .eigvecs from a bigger cohort wrote past the end of the
+  // matrix -- silently, since Eigen has no bounds check under -DNDEBUG. Its
+  // inner loop had the mirror problem: it stopped only on k1 == k, so a short
+  // line ran i past the end of the string, and the "columns not aligned" check
+  // below it could never fire.
+  Mat2D M(n, k);
+  std::string line;
+  int j = 0;
+  while (std::getline(fin, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+    if (line.find_first_not_of(" \t") == std::string::npos) continue;  // blank line
+    if (j >= n)
+      cao.error(path, " has more than the ", n, " rows this dataset needs. is it from a different cohort?");
+    const char* p = line.c_str();
+    for (int c = 0; c < k; ++c) {
+      char* end = nullptr;
+      const double v = std::strtod(p, &end);  // strtod skips leading blanks itself
+      if (end == p)
+        cao.error(path, ": row ", j + 1, " has only ", c, " values but ", k,
+                  " are needed. rerun the reference with a larger -k, or use a smaller one here");
+      M(j, c) = v;
+      p = end;
+    }
+    ++j;
+  }
+  if (j != n) cao.error(path, " has ", j, " rows but this dataset needs ", n);
 
   return M;
 }
@@ -393,7 +490,7 @@ Mat1D read_frq(const std::string& path) {
   std::ifstream fin(path);
   // without this the file simply reads as empty, F stays size 0, and the first
   // F(snp_idx) downstream segfaults with no message. -P/--USV points filebim at
-  // <prefix>.mbim, which only a run with -D/--ld writes, so a prefix from a
+  // <prefix>.mbim, which only a run with -V/--printv writes, so a prefix from a
   // plain PCA run lands here.
   if (!fin.is_open()) cao.error("can not open the allele frequency file\n => " + path);
   std::string line;
@@ -557,7 +654,10 @@ BimMatch match_pvar_to_mbim(const std::string& pvar_file, const std::string& mbi
 }
 
 BimMatch match_beagle_to_mbim(const std::string& beagle_file, const std::string& mbim_file) {
-  // Parse BEAGLE rows as marker_allele1_allele2 so matching respects allele order.
+  // Key BEAGLE rows as marker_allele2_allele1. BEAGLE GLs count allele2 (AA, AB,
+  // BB), while the .mbim counts A1 (BED2GENO; PGEN exposes ALT as A1), so the
+  // counted alleles line up only with allele2 first. Keying allele1 first
+  // flipped exactly the sites that were already aligned.
   gzFile fp = gzopen(beagle_file.c_str(), "r");
   if (!fp) cao.error("can not open " + beagle_file);
   uint64 bufsize = (uint64)128 * 1024 * 1024;
@@ -574,8 +674,8 @@ BimMatch match_beagle_to_mbim(const std::string& beagle_file, const std::string&
     char* allele1 = strtok_r(NULL, delims, &buffer);
     char* allele2 = strtok_r(NULL, delims, &buffer);
     if (!marker || !allele1 || !allele2) cao.error("invalid BEAGLE record while matching markers:\n => " + beagle_file);
-    beagle_markers.push_back(std::string(marker) + "_" + decode_beagle_allele(allele1) + "_" +
-                             decode_beagle_allele(allele2));
+    beagle_markers.push_back(std::string(marker) + "_" + decode_beagle_allele(allele2) + "_" +
+                             decode_beagle_allele(allele1));
     buffer = original;
   }
   gzclose(fp);
@@ -667,9 +767,12 @@ String1D parse_beagle_samples(const std::string& fin) {
   const char* delims = "\t \n";
   char *buffer, *tok;
   uint64 bufsize = (uint64)128 * 1024 * 1024;
-  buffer = (char*)calloc(bufsize, sizeof(char));
   gzFile fp = gzopen(fin.c_str(), "r");
+  if (!fp) cao.error("can not open " + fin);
+  buffer = (char*)calloc(bufsize, sizeof(char));
   tgets(fp, &buffer, &bufsize);
+  // strtok_r advances `buffer`, so keep the block to free it (it leaked 128 MB)
+  std::unique_ptr<char, decltype(&free)> owner(buffer, &free);
   strtok_r(buffer, delims, &buffer);
   int nCol = 1;
   String1D res;
@@ -685,15 +788,50 @@ String1D parse_beagle_samples(const std::string& fin) {
 void write_eigvecs2_beagle(const Mat2D& U, const std::string& fin, const std::string& fout) {
   std::ofstream feig2(fout);
   if (!feig2.is_open()) cao.error("can not open " + fout);
+  const String1D ids = parse_beagle_samples(fin);
+  if ((Eigen::Index)ids.size() != U.rows())
+    cao.error("BUG: " + fin + " has " + std::to_string(ids.size()) + " samples but U has " + std::to_string(U.rows()));
+  // one column per PC, tab-separated like the other .eigvecs2 files. The header
+  // used to list a PC per sample, and the values were space-padded.
   feig2 << "#FID\tIID";
-  int i = 0;
-  for (i = 0; i < U.rows(); i++) feig2 << "\tPC" << i + 1;
+  for (Eigen::Index k = 0; k < U.cols(); k++) feig2 << "\tPC" << k + 1;
   feig2 << "\n";
-  i = 0;
-  for (const auto& s : parse_beagle_samples(fin)) {
-    feig2 << s << "\t" << s << "\t" << U.row(i) << "\n";
-    i++;
+  const std::streamsize old = feig2.precision(6);
+  for (Eigen::Index i = 0; i < U.rows(); i++) {
+    feig2 << ids[i] << "\t" << ids[i];
+    for (Eigen::Index k = 0; k < U.cols(); k++) feig2 << "\t" << U(i, k);
+    feig2 << "\n";
   }
+  feig2.precision(old);
+}
+
+int ref_pcs(const Param& params, int navail, const std::string& path) {
+  if (navail <= 0) cao.error(path, "has no PCs");
+  if (params.ref_k == 0) return navail;
+  if ((int)params.ref_k > navail)
+    cao.error("-k/--pc", params.ref_k, "is larger than the", navail, "PCs in", path);
+  return params.ref_k;
+}
+
+void write_pcangsd_cov(const Mat2D& E, const Mat1D& Dc, uint nsnps, const Param& params) {
+  Mat2D C = E * E.transpose();
+  C.array() /= (double)nsnps;
+  C.diagonal() = Dc.array() / (double)nsnps;
+  std::ofstream fcov(params.fileout + ".cov");
+  if (!fcov.is_open()) cao.error("can not open " + params.fileout + ".cov");
+  fcov << C << "\n";
+  // C is symmetric: its eigenvectors are its singular vectors. JacobiSVD took
+  // 21 s at N = 1000 and 215 s at N = 1500; this takes 0.7 s and 2.5 s.
+  Eigen::SelfAdjointEigenSolver<Mat2D> es(C);
+  if (es.info() != Eigen::Success) cao.error("failed eigendecomposition of the PCAngsd covariance matrix");
+  const Eigen::Index k = std::min<Eigen::Index>(params.k, C.rows());
+  Mat2D U = es.eigenvectors().rightCols(k).rowwise().reverse();  // largest first
+  for (Eigen::Index j = 0; j < k; ++j) {                         // same sign rule as flip_UV
+    Eigen::Index x;
+    U.col(j).cwiseAbs().maxCoeff(&x);
+    if (U(x, j) < 0) U.col(j) *= -1;
+  }
+  write_eigvecs2_beagle(U, params.filein, params.fileout + ".eigvecs2");
 }
 
 double chisq1d(const double x) {
@@ -882,83 +1020,251 @@ void galinsky_selection_stat(Mat2D& V) {
 }
 
 namespace {
-double robust_mad(const Mat1D& x) {
-  std::vector<double> vals(x.data(), x.data() + x.size());
-  double med = get_median(vals);
-  for (double& v : vals) v = std::abs(v - med);
-  double mad = 1.482602218505602 * get_median(vals);
-  if (mad > 0.0 && std::isfinite(mad)) return mad;
 
-  if (x.size() <= 1) return 1.0;
-  double mean = x.mean();
-  double var = (x.array() - mean).square().sum() / std::max(1.0, static_cast<double>(x.size() - 1));
-  double sd = std::sqrt(var);
-  return (sd > 0.0 && std::isfinite(sd)) ? sd : 1.0;
+// ---------------------------------------------------------------------------
+// Orthogonalized Gnanadesikan-Kettenring (Maronna & Zamar 2002), matching
+// bigutilsr::dist_ogk() -- which is what pcadapt calls -- with its defaults
+// niter = 2, beta = 0.9 and the tau scale of Yohai & Zamar (1998).
+//
+// The plain pairwise GK estimator this replaces was not even scale
+// equivariant: rescaling one column of z-scores changed the Mahalanobis
+// distances, so the statistic depended on an arbitrary normalization. The
+// orthogonalization step fixes that, and the final reweighted estimate is a
+// classical covariance of the retained rows, so it is positive definite by
+// construction rather than by flooring eigenvalues.
+// ---------------------------------------------------------------------------
+
+constexpr double TAU_C1 = 4.5;
+constexpr double TAU_C2 = 3.0;
+constexpr double QNORM_3_4 = 0.6744897501960817;   // qnorm(3/4)
+constexpr double INV_SQRT2 = 0.7071067811865475244;
+constexpr double SQRT_2PI = 2.5066282746310005024;
+
+// E[rho] for the consistency factor of the tau scale at the normal, exactly as
+// robustbase::scaleTau2 computes it: Es2(c2) = Erho(c2 * qnorm(3/4)).
+double tau_Erho(double b) {
+  const double Phi = 0.5 * std::erfc(-b * INV_SQRT2);
+  const double phi = std::exp(-0.5 * b * b) / SQRT_2PI;
+  return 2.0 * ((1.0 - b * b) * Phi - b * phi + b * b) - 1.0;
+}
+const double TAU_ES2 = tau_Erho(TAU_C2 * QNORM_3_4);
+
+// scaleTau2 with robustbase's defaults (c1 = 4.5, c2 = 3, consistency at the
+// normal, iter = 1). Returns the scale, and the location too when asked.
+// `buf` is scratch the caller owns; we reorder and overwrite it.
+double scale_tau2(const double* x, Eigen::Index n, std::vector<double>& buf, double* mu_out = nullptr) {
+  buf.assign(x, x + n);
+  const double mu0 = median_inplace(buf);
+  for (Eigen::Index i = 0; i < n; ++i) buf[i] = std::abs(x[i] - mu0);
+  const double sigma0 = median_inplace(buf);  // MAD without the consistency factor
+  if (!(sigma0 > 0.0)) {  // more than half the column is a single value
+    if (mu_out) *mu_out = mu0;
+    return 0.0;
+  }
+
+  // location: a one-step weighted mean, weights falling to zero at c1 * sigma0
+  const double inv = 1.0 / (sigma0 * TAU_C1);
+  double sw = 0.0, sxw = 0.0;
+  for (Eigen::Index i = 0; i < n; ++i) {
+    const double t = std::abs(x[i] - mu0) * inv;
+    const double u = 1.0 - t * t;
+    if (u > 0.0) {
+      const double w = u * u;
+      sw += w;
+      sxw += x[i] * w;
+    }
+  }
+  const double mu = (sw > 0.0) ? sxw / sw : mu0;
+
+  // scale: the winsorized second moment about that location
+  const double c2sq = TAU_C2 * TAU_C2;
+  double rho = 0.0;
+  for (Eigen::Index i = 0; i < n; ++i) {
+    const double z = (x[i] - mu) / sigma0;
+    rho += std::min(z * z, c2sq);
+  }
+  if (mu_out) *mu_out = mu;
+  return sigma0 * std::sqrt(rho / ((double)n * TAU_ES2));
 }
 
-Mat1D robust_center(const Mat2D& X) {
-  Mat1D center(X.cols());
-  for (int j = 0; j < X.cols(); ++j) {
-    std::vector<double> vals(X.rows());
-    for (int i = 0; i < X.rows(); ++i) vals[i] = X(i, j);
-    center(j) = get_median(vals);
-  }
-  return center;
-}
+// One Maronna-Zamar step, in place: scale every column to unit tau scale, form
+// the pairwise GK matrix of the scaled columns, and rotate onto its
+// eigenvectors. `tmp` is scratch of the same shape as Z.
+void ogk_step(Mat2D& Z, Mat2D& tmp) {
+  const int p = (int)Z.cols();
+  const Eigen::Index n = Z.rows();
 
-Mat2D robust_cov_gk(const Mat2D& X, const Mat1D& center) {
-  const int p = X.cols();
-  Mat2D cov = Mat2D::Zero(p, p);
-  Mat2D Xc = X.rowwise() - center.transpose();
-
-  for (int i = 0; i < p; ++i) {
-    double scale = robust_mad(Xc.col(i));
-    cov(i, i) = scale * scale;
-  }
-
-  for (int i = 0; i < p; ++i) {
-    for (int j = i + 1; j < p; ++j) {
-      Mat1D plus = Xc.col(i) + Xc.col(j);
-      Mat1D minus = Xc.col(i) - Xc.col(j);
-      double splus = robust_mad(plus);
-      double sminus = robust_mad(minus);
-      double cij = 0.25 * (splus * splus - sminus * sminus);
-      cov(i, j) = cij;
-      cov(j, i) = cij;
+#pragma omp parallel
+  {
+    std::vector<double> buf;
+#pragma omp for schedule(static)
+    for (int j = 0; j < p; ++j) {
+      const double s = scale_tau2(Z.col(j).data(), n, buf);
+      if (s > 0.0) Z.col(j) /= s;
     }
   }
 
-  Eigen::SelfAdjointEigenSolver<Mat2D> eig(cov);
-  if (eig.info() != Eigen::Success) cao.error("failed eigendecomposition of pcadapt robust covariance.");
-  Mat1D evals = eig.eigenvalues();
-  double max_eval = std::max(1.0, evals.maxCoeff());
-  double floor = max_eval * 1e-8;
-  for (int i = 0; i < evals.size(); ++i) evals(i) = std::max(evals(i), floor);
-  return eig.eigenvectors() * evals.asDiagonal() * eig.eigenvectors().transpose();
+  // the diagonal is 1 by construction, the columns now having unit tau scale
+  Mat2D S = Mat2D::Identity(p, p);
+  Int1D pi, pj;
+  pi.reserve(p * (p - 1) / 2);
+  pj.reserve(p * (p - 1) / 2);
+  for (int i = 0; i < p; ++i)
+    for (int j = i + 1; j < p; ++j) pi.push_back(i), pj.push_back(j);
+  const int npairs = (int)pi.size();
+
+#pragma omp parallel
+  {
+    std::vector<double> buf;
+    Mat1D plus(n), minus(n);
+#pragma omp for schedule(dynamic)
+    for (int t = 0; t < npairs; ++t) {
+      const int i = pi[t], j = pj[t];
+      plus = Z.col(i) + Z.col(j);
+      minus = Z.col(i) - Z.col(j);
+      const double sp = scale_tau2(plus.data(), n, buf);
+      const double sm = scale_tau2(minus.data(), n, buf);
+      const double cij = 0.25 * (sp * sp - sm * sm);
+      S(i, j) = cij;
+      S(j, i) = cij;
+    }
+  }
+
+  Eigen::SelfAdjointEigenSolver<Mat2D> eig(S);
+  if (eig.info() != Eigen::Success) cao.error("failed eigendecomposition of the pcadapt OGK matrix.");
+  tmp.noalias() = Z * eig.eigenvectors();
+  Z.swap(tmp);
+}
+
+// Robust location and scatter by OGK, followed by the hard-rejection
+// reweighting that bigutilsr::covrob_ogk() applies.
+void robust_cov_ogk(const Mat2D& U, Mat1D& wcenter, Mat2D& wcov, int niter, double beta) {
+  const int p = (int)U.cols();
+  const Eigen::Index n = U.rows();
+
+  Mat2D Z = U, tmp(n, p);
+  for (int it = 0; it < niter; ++it) ogk_step(Z, tmp);
+  tmp.resize(0, 0);
+
+  // location and scale of the orthogonalized data; the distance is then just
+  // the standardized sum of squares in that basis
+  Mat1D ctr(p), sg(p);
+#pragma omp parallel
+  {
+    std::vector<double> buf;
+#pragma omp for schedule(static)
+    for (int j = 0; j < p; ++j) {
+      double m = 0.0;
+      sg(j) = scale_tau2(Z.col(j).data(), n, buf, &m);
+      ctr(j) = m;
+    }
+  }
+
+  Mat1D d(n);
+#pragma omp parallel for schedule(static)
+  for (Eigen::Index i = 0; i < n; ++i) {
+    double acc = 0.0;
+    for (int j = 0; j < p; ++j) {
+      if (!(sg(j) > 0.0)) continue;  // degenerate direction carries no information
+      const double t = (Z(i, j) - ctr(j)) / sg(j);
+      acc += t * t;
+    }
+    d(i) = acc;
+  }
+  Z.resize(0, 0);
+
+  std::vector<double> dv(d.data(), d.data() + n);
+  const double cdelta = median_inplace(dv) / qchisq(0.5, p);
+  const double cutoff = qchisq(beta, p) * cdelta;
+
+  Eigen::Index nkeep = 0;
+  for (Eigen::Index i = 0; i < n; ++i)
+    if (d(i) < cutoff) ++nkeep;
+  const bool use_all = (nkeep <= (Eigen::Index)p);
+  if (use_all)
+    cao.warn("pcadapt: the OGK reweighting kept only ", nkeep,
+             " sites, too few to estimate a covariance; using all sites instead");
+
+  auto kept = [&](Eigen::Index i) { return use_all || d(i) < cutoff; };
+  const double nk = (double)(use_all ? n : nkeep);
+
+  wcenter = Mat1D::Zero(p);
+  for (Eigen::Index i = 0; i < n; ++i)
+    if (kept(i)) wcenter += U.row(i).transpose();
+  wcenter /= nk;
+
+  wcov = Mat2D::Zero(p, p);
+#pragma omp parallel
+  {
+    Mat2D acc = Mat2D::Zero(p, p);
+    Mat1D v(p);
+#pragma omp for schedule(static)
+    for (Eigen::Index i = 0; i < n; ++i) {
+      if (!kept(i)) continue;
+      v = U.row(i).transpose() - wcenter;
+      acc.selfadjointView<Eigen::Lower>().rankUpdate(v);
+    }
+#pragma omp critical
+    wcov += acc;
+  }
+  for (int a = 0; a < p; ++a)  // rankUpdate only filled the lower triangle
+    for (int b = a + 1; b < p; ++b) wcov(a, b) = wcov(b, a);
+  wcov /= nk;
 }
 }  // namespace
 
-void pcadapt_selection_stats(const Mat2D& Z, Mat1D& stat, Mat1D& chi2_stat, Mat1D& pval, double& gif) {
-  const int k = Z.cols();
-  Mat1D center = robust_center(Z);
-  Mat2D cov = robust_cov_gk(Z, center);
-  Mat2D inv_cov = cov.inverse();
+void pcadapt_selection_stats(const Mat2D& Z, const std::vector<char>& keep, Mat1D& stat, Mat1D& chi2_stat,
+                             Mat1D& pval, double& gif) {
+  const int k = (int)Z.cols();
+  const Eigen::Index n = Z.rows();
 
-  stat = Mat1D::Zero(Z.rows());
-#pragma omp parallel for
-  for (int i = 0; i < Z.rows(); ++i) {
-    Mat1D dz = Z.row(i).transpose() - center;
-    stat(i) = dz.transpose() * inv_cov * dz;
+  // Sites with no residual variance have an undefined z-score. They must not
+  // reach the robust covariance, the inflation median or the output: pcadapt
+  // fits on `zscores[pass, ]` and leaves the rest NA, and so do we. The common
+  // case drops nothing, and then no copy is made.
+  std::vector<Eigen::Index> idx;
+  for (Eigen::Index i = 0; i < n; ++i)
+    if (keep[i]) idx.push_back(i);
+  const Eigen::Index nk = (Eigen::Index)idx.size();
+  if (nk <= k)
+    cao.error("pcadapt: only ", nk, " of ", n,
+              " sites have any residual variance, too few to fit a ", k, "-dimensional covariance");
+
+  const bool subset = (nk != n);
+  Mat2D Zs;
+  if (subset) {
+    Zs.resize(nk, k);
+    for (Eigen::Index i = 0; i < nk; ++i) Zs.row(i) = Z.row(idx[i]);
+  }
+  const Mat2D& W = subset ? Zs : Z;
+
+  Mat1D center;
+  Mat2D cov;
+  robust_cov_ogk(W, center, cov, 2, 0.9);  // bigutilsr::covrob_ogk defaults
+  Mat2D inv_cov = cov.inverse();
+  if (!inv_cov.allFinite())
+    cao.error("pcadapt: the robust covariance of the z-scores is singular; try a smaller -k");
+
+  Mat1D s(nk);
+#pragma omp parallel for schedule(static)
+  for (Eigen::Index i = 0; i < nk; ++i) {
+    Mat1D dz = W.row(i).transpose() - center;
+    s(i) = dz.transpose() * inv_cov * dz;
   }
 
-  std::vector<double> stat_vec(stat.data(), stat.data() + stat.size());
-  gif = get_median(stat_vec) / qchisq(0.5, k);
+  std::vector<double> stat_vec(s.data(), s.data() + nk);
+  gif = median_inplace(stat_vec) / qchisq(0.5, k);  // stat_vec is ours to reorder
   if (!(gif > 0.0) || !std::isfinite(gif)) gif = 1.0;
 
-  chi2_stat = stat / gif;
-  pval = Mat1D::Zero(Z.rows());
-#pragma omp parallel for
-  for (int i = 0; i < pval.size(); ++i) {
-    pval(i) = pchisq(chi2_stat(i), k, false);
+  const double NA = std::numeric_limits<double>::quiet_NaN();
+  stat = Mat1D::Constant(n, NA);
+  chi2_stat = Mat1D::Constant(n, NA);
+  pval = Mat1D::Constant(n, NA);
+#pragma omp parallel for schedule(static)
+  for (Eigen::Index i = 0; i < nk; ++i) {
+    const Eigen::Index r = idx[i];
+    stat(r) = s(i);
+    chi2_stat(r) = s(i) / gif;
+    pval(r) = pchisq(chi2_stat(r), k, false);
   }
 }

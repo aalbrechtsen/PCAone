@@ -10,6 +10,7 @@
 #include "Common.hpp"
 #include "Data.hpp"
 #include "EvalAdmix.hpp"
+#include "Exact.hpp"
 #include "FileBeagle.hpp"
 #include "FileBgen.hpp"
 #include "FileBinary.hpp"
@@ -46,6 +47,11 @@ static void setEnvironmentVariables(int threadCount) {
   setenv("MKL_NUM_THREADS", countStr.c_str(), 1);
   setenv("OMP_NUM_THREADS", countStr.c_str(), 1);
   setenv("OPENBLAS_NUM_THREADS", countStr.c_str(), 1);
+  // setenv alone does not bound OpenMP: the runtime reads OMP_NUM_THREADS when
+  // it initializes, before main() runs, so setting it here is too late and -n
+  // was silently ignored -- every parallel region used the whole machine. MKL
+  // and OpenBLAS read their variables lazily, so those two do take effect.
+  omp_set_num_threads(threadCount > 0 ? threadCount : 1);
 }
 
 // With few individuals per population the GRM diagonal reflects heterozygosity
@@ -59,7 +65,7 @@ static void warn_small_sample(const Param& params, uint N) {
            "rather than structure and can create a spurious PC; consider --impute-diag");
 }
 
-int main(int argc, char* argv[]) {
+static int run(int argc, char* argv[]) {
   Param params(argc, argv);
   cao.cao.open(params.fileout + ".log");
   if (params.verbose > 0) cao.is_screen = true;
@@ -68,7 +74,7 @@ int main(int argc, char* argv[]) {
   uint max_threads = std::thread::hardware_concurrency();
   max_threads = params.threads > max_threads ? max_threads : params.threads;
   setEnvironmentVariables(max_threads);
-  cao.print(tick.date(), "program started");
+  cao.print(tick.date(), "program started with " + std::to_string(max_threads) + " threads");
   Data* data = nullptr;
 
   // particular case for inbreeding sites
@@ -80,28 +86,34 @@ int main(int argc, char* argv[]) {
   }
 
   // particular case for inbreeding samples
-  // if (params.inbreed == 2) {
-  //   data = new FileUSV(params);
-  //   run_inbreed_coef_sample(data, params);
-  //   delete data;
-  //   return bye();
-  // }
+  if (params.inbreed == 2) {
+    data = new FileUSV(params);
+    run_inbred_samples(data, params);
+    delete data;
+    return bye();
+  }
 
-  // particular case for LD
-  if (((params.file_t == FileType::BINARY ||
-        (((params.file_t == FileType::PLINK) || (params.file_t == FileType::PGEN)) && !params.fileU.empty())) &&
-       (params.print_r2 || params.ld_r2 > 0 || !params.clump.empty()))) {
-    if (params.filebim.empty()) params.filebim = params.filein + (params.file_t == FileType::PGEN ? ".pvar" : ".bim");
-    if (params.file_t == FileType::BINARY)
-      data = new FileBin(params);
-    else if (params.file_t == FileType::PLINK) {
-      params.memory = 0, params.out_of_core = false;
+  // particular case for LD: R2, pruning and clumping on the genotypes, with the
+  // PCs of -P/--USV removed as they are read. Cmd.cpp allows only PLINK/PGEN
+  // here and turns off the shuffling, as LD walks the sites in file order.
+  if (params.ld) {
+    if (params.file_t == FileType::PLINK)
       data = new FileBed(params);
-    } else {
-      params.memory = 0, params.out_of_core = false;
+    else
       data = new FilePgen(params);
-    }
     run_ld_stuff(data, params);
+    delete data;
+    return bye();
+  }
+
+  // evalAdmix is a second-stage analysis of existing PCs from -P/--USV.
+  if (params.evaladmix) {
+    if (params.file_t == FileType::PLINK)
+      data = new FileBed(params);
+    else
+      data = new FilePgen(params);
+    data->prepare();
+    run_evaladmix(data, params);
     delete data;
     return bye();
   }
@@ -122,6 +134,23 @@ int main(int argc, char* argv[]) {
 
   // particular case for Selection
   if ((params.selection > 0) && (params.file_t == FileType::PLINK || params.file_t == FileType::PGEN)) {
+    // perm must be off, and here it is not merely safe but required.
+    //
+    // params.perm is on by default, since the default --svd 2 is winSVD and
+    // --no-shuffle is off. But --selection decomposes nothing: it reads a
+    // reference U and passes over the genotypes once. The permutation this flag
+    // announces is only built further down, past this early return, so nothing
+    // initializes it here. For PGEN the permutation is *logical* -- FilePgen
+    // maps every read through perm.indices() -- so read_block_initial() indexes
+    // an empty permutation and segfaults out-of-core. PLINK escaped it only
+    // because its permutation lives in a temp .bed that --selection never
+    // writes, leaving it to read the original file in stored order.
+    //
+    // Unlike --evaladmix, whose statistic is a sum over sites, site order
+    // matters here: the rows of .zscore / .galinsky / .pcadapt* are positional
+    // against the .bim/.pvar. So the fix is to clear the flag rather than to
+    // build a permutation.
+    params.perm = false;
     if (params.file_t == FileType::PLINK)
       data = new FileBed(params);
     else
@@ -166,33 +195,31 @@ int main(int argc, char* argv[]) {
   }
 
   const bool ooc_permutation = params.perm && params.out_of_core;
-  if (params.perm && params.out_of_core && params.svd_t == SvdType::IRAM) {
-    cao.warn("permutation is disabled for the Arnoldi/IRAM method");
-  }
+  if (params.perm_mem > 0 && !(ooc_permutation && params.file_t == FileType::PLINK))
+    cao.warn("--perm-mem only applies to the out-of-core winSVD on PLINK input with shuffling; ignored");
 
   if (ooc_permutation) {
     tick.clock();
     if (params.file_t == FileType::PLINK) {
-      auto perm = permute_plink(params.filein, params.fileout, params.buffer, params.bands);
+      // The BED is permuted after prepare(), which sets the -w bands it shuffles into.
       data = new FileBed(params);
-      data->perm = perm;
     } else if (params.file_t == FileType::PGEN) {
       // Logical permutation is initialized after prepare(), when blocksize is known.
       data = new FilePgen(params);
     } else if (params.file_t == FileType::BGEN) {
-      auto perm = permute_bgen(params.filein, params.fileout, params.threads);
+      auto perm = permute_bgen(params.filein, params.fileout, params.threads, params.seed);
       data = new FileBgen(params);
       data->perm = perm;
     } else if (params.file_t == FileType::CSV) {
-      auto perm =
-          shuffle_csvzstd_to_bin(params.filein, params.fileout, params.buffer, params.scale, params.scaleFactor);
+      auto perm = shuffle_csvzstd_to_bin(params.filein, params.fileout, params.buffer, params.scale, params.scaleFactor,
+                                         params.seed);
       params.file_t = FileType::BINARY;
       data = new FileBin(params);
       data->perm = perm;
     } else {
       cao.error("wrong file type used!");
     }
-    if (params.file_t != FileType::PGEN)
+    if (params.file_t != FileType::PGEN && params.file_t != FileType::PLINK)
       cao.print(tick.date(), "elapsed time of permuting data:", tick.reltime(), " seconds");
   } else {
     if (params.file_t == FileType::PLINK) {
@@ -203,13 +230,22 @@ int main(int argc, char* argv[]) {
       data = new FileBgen(params);
     } else if (params.file_t == FileType::BEAGLE) {
       data = new FileBeagle(params);
-    } else if (params.file_t == FileType::BINARY) {
-      data = new FileBin(params);
     } else if (params.file_t == FileType::CSV) {
       data = new FileCsv(params);
     } else {
       cao.error("invalid input files!");
     }
+  }
+
+  // --svd 3 with no more samples than sites needs only the N x N GRM, so it
+  // streams the genotypes block by block instead of holding G (N x M doubles):
+  // 400 x 656,281 took 2.1 GB, now 0.11 GB. -m sets the block size. --maf
+  // filters only in-core, and N > M decomposes the M x M G'G in-core.
+  if (params.svd_t == SvdType::FULL) {
+    if (!params.filterSNP && data->nsamples <= data->nsnps)
+      params.out_of_core = true;
+    else if (params.memory > 0)
+      cao.warn("-m is ignored: --svd 3 runs in-core with --maf, or with more samples than sites");
   }
 
   // be prepared for run
@@ -218,10 +254,42 @@ int main(int argc, char* argv[]) {
       params.project == 0 && params.selection == 0 && params.inbreed == 0 && !params.ld && !params.evaladmix &&
       params.filekin.empty())
     warn_small_sample(params, data->nsamples);
+  // every SVD below indexes the first sample and site
+  if (data->nsamples == 0 || data->nsnps == 0)
+    cao.error("the input has " + std::to_string(data->nsamples) + " samples and " + std::to_string(data->nsnps) +
+              " sites; nothing to decompose");
+  // At most min(N, M) - 1 PCs of centred data carry anything: more came back as
+  // arbitrary vectors from the null space, and different on every run.
+  const uint rank_max = std::min(data->nsamples, data->nsnps);
+  if (params.k >= rank_max)
+    cao.error("-k/--pc " + std::to_string(params.k) + " must be smaller than the number of samples and of sites (" +
+              std::to_string(data->nsamples) + " and " + std::to_string(data->nsnps) + ")");
+  // the RSVD cannot use more test vectors, nor the IRAM more Lanczos vectors, than that
+  if (params.k + params.oversamples > rank_max) {
+    params.oversamples = rank_max - params.k;
+    cao.warn("--oversamples reduced to " + std::to_string(params.oversamples) +
+             " so that k + oversamples <= " + std::to_string(rank_max));
+  }
+  if (params.ncv > rank_max) {
+    params.ncv = rank_max;
+    cao.warn("--ncv reduced to " + std::to_string(params.ncv) + ", the size of the problem");
+  }
+  if (ooc_permutation && params.file_t == FileType::PLINK) {
+    tick.clock();
+    if (params.perm_mem > 0)
+      static_cast<FileBed*>(data)->apply_logical_permutation(params);
+    else
+      static_cast<FileBed*>(data)->apply_permutation(params);
+    cao.print(tick.date(), "elapsed time of permuting data:", tick.reltime(), " seconds");
+  }
   if (ooc_permutation && params.file_t == FileType::PGEN) {
-    data->perm = compute_pgen_perm(data->nsnps, params.bands, data->blocksize, max_threads, params.seed);
+    // The permutation draws each block from a fixed number of shuffled source
+    // regions, one per reading thread at that many threads. It used the thread
+    // count, so the same --seed gave different PCs with a different -n.
+    const uint regions = 16;
+    data->perm = compute_pgen_perm(data->nsnps, params.bands, data->blocksize, regions, params.seed);
     cao.print(tick.date(), "initialized logical PGEN permutation. blocksize:", data->blocksize,
-              ", batches:", params.bands, ", threads:", max_threads);
+              ", batches:", params.bands, ", source regions:", regions);
   }
 
   // kinship-whitened PCA: down-weight close relatives by Sigma^{-1/2}
@@ -237,44 +305,7 @@ int main(int argc, char* argv[]) {
   } else if (params.svd_t == SvdType::PCAoneAlg1 || params.svd_t == SvdType::PCAoneAlg2) {
     run_pca_with_halko(data, params);
   } else if (params.svd_t == SvdType::FULL) {
-    if (params.file_t == FileType::PLINK || params.file_t == FileType::BGEN || params.file_t == FileType::PGEN)
-      data->standardize_E();
-    data->whiten_G();
-    cao.print(tick.date(), "running exact PCA with in-core eigendecomposition (PLINK-like).");
-    const Eigen::Index ncomp = std::min<Eigen::Index>(params.k, std::min<Eigen::Index>(data->G.rows(), data->G.cols()));
-    Mat1D evals(ncomp), svals(ncomp);
-    Mat2D U(data->nsamples, ncomp), V(data->nsnps, ncomp);
-    if (data->nsamples <= data->nsnps) {
-      Mat2D K = (data->G * data->G.transpose()) / data->nsnps;
-      Eigen::SelfAdjointEigenSolver<Mat2D> eig(K);
-      if (eig.info() != Eigen::Success) cao.error("failed eigendecomposition of the sample covariance matrix.");
-      for (Eigen::Index i = 0; i < ncomp; ++i) {
-        Eigen::Index idx = eig.eigenvalues().size() - 1 - i;
-        evals(i) = std::max(0.0, eig.eigenvalues()(idx));
-        U.col(i) = eig.eigenvectors().col(idx);
-      }
-      svals = (evals.array() * data->nsnps).sqrt();
-      V.noalias() = data->G.transpose() * U;
-      for (Eigen::Index i = 0; i < ncomp; ++i) {
-        if (svals(i) > 0) V.col(i) /= svals(i);
-      }
-    } else {
-      Mat2D K = (data->G.transpose() * data->G) / data->nsnps;
-      Eigen::SelfAdjointEigenSolver<Mat2D> eig(K);
-      if (eig.info() != Eigen::Success) cao.error("failed eigendecomposition of the feature covariance matrix.");
-      for (Eigen::Index i = 0; i < ncomp; ++i) {
-        Eigen::Index idx = eig.eigenvalues().size() - 1 - i;
-        evals(i) = std::max(0.0, eig.eigenvalues()(idx));
-        V.col(i) = eig.eigenvectors().col(idx);
-      }
-      svals = (evals.array() * data->nsnps).sqrt();
-      U.noalias() = data->G * V;
-      for (Eigen::Index i = 0; i < ncomp; ++i) {
-        if (svals(i) > 0) U.col(i) /= svals(i);
-      }
-    }
-    flip_UV(U, V);
-    data->write_eigs_files(evals, svals, U, V);
+    run_pca_exact(data, params);
   } else {
     cao.error("unsupported PCA method!");
   }
@@ -283,23 +314,6 @@ int main(int argc, char* argv[]) {
 
   delete data;
   delete whitener;
-
-  // evalAdmix: correlation of residuals given the PCs just computed.
-  // needs a second pass over the raw (uncentered, unstandardized) genotypes.
-  if (params.evaladmix) {
-    if (params.file_t != FileType::PLINK && params.file_t != FileType::PGEN)
-      cao.error("--evaladmix currently supports PLINK bed/pgen input only");
-    // Second pass over the RAW genotypes. Param is not copyable, so mutate in
-    // place -- the PCA is finished by now. center=false gives untransformed
-    // {0, 0.5, 1} codes; read_all()/read_block_initial(.., false) never
-    // standardize, and dopca stays on so the same --maf filter selects the
-    // same sites the PCA used.
-    params.center = false;
-    Data* d2 = (params.file_t == FileType::PLINK) ? (Data*)new FileBed(params) : (Data*)new FilePgen(params);
-    d2->prepare();
-    run_evaladmix(d2, params);
-    delete d2;
-  }
 
   if (params.file_t == FileType::PLINK)
     make_plink2_eigenvec_file(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
@@ -310,16 +324,37 @@ int main(int argc, char* argv[]) {
 
   // remove temp files if verbose < 3
   if (ooc_permutation && params.verbose < 3) {
-    if (params.file_t == FileType::PLINK) {
+    // only the copy <out>.perm.* is removed; with --perm-mem nothing was written
+    // and filein is still the user's input
+    if (params.file_t == FileType::PLINK && params.perm_mem == 0 && params.filein == params.fileout + ".perm") {
       for (auto suf : std::vector<std::string>{".bed", ".bim", ".fam"}) {
         std::filesystem::path tmpfile{params.filein + suf};
         std::filesystem::remove(tmpfile);
       }
     }
-    if ((params.file_t == FileType::BGEN) || (params.file_t == FileType::CSV)) {
+    // a shuffled CSV is read back as BINARY, from <out>.perm.bin
+    if ((params.file_t == FileType::BGEN) || (params.file_t == FileType::CSV) ||
+        (params.file_t == FileType::BINARY)) {
       std::filesystem::path tmpfile{params.filein};
       std::filesystem::remove(tmpfile);
     }
   }
   return bye();
+}
+
+// cao.error() throws, and so do Eigen (std::bad_alloc) and the standard library.
+// Uncaught, each of them aborted the run with "terminate called after throwing
+// ..." and exit code 134, which looks like a crash to the user and to workflow
+// managers. Report the message and exit with 1 instead.
+int main(int argc, char* argv[]) {
+  try {
+    return run(argc, argv);
+  } catch (const std::bad_alloc&) {
+    std::cerr << "Error: out of memory (std::bad_alloc). consider -m/--memory for the out-of-core mode\n";
+  } catch (const std::exception& e) {
+    std::string msg = e.what();
+    if (msg.empty() || msg.back() != '\n') msg += '\n';
+    std::cerr << "Error: " << msg;
+  }
+  return EXIT_FAILURE;
 }

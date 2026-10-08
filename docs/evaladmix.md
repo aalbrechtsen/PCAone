@@ -9,7 +9,8 @@ et al. (2023, *Genetics* 225:iyad157), with **PCA rather than an admixture model
 as the front-end.
 
 ```bash
-PCAone -b plink -k <K-1> --evaladmix --maf 0.05 -o out
+PCAone -b plink -k <K-1> --maf 0.05 -o pcs
+PCAone -b plink -P pcs --evaladmix --maf 0.05 -o out
 ```
 
 writes
@@ -17,9 +18,23 @@ writes
 - `out.corres` — the N x N correlation of residuals, and
 - `out.kinship` — the same divided by 2, which is the kinship scale,
 
-both with sample IDs from the `.fam`. `--evaladmix-k` selects how many of the
-computed PCs enter the projection, so one run can produce many PCs for other
-purposes while the statistic uses `K-1`.
+both with sample IDs from the `.fam` or `.psam` on the header line.
+`-k/--pc` selects how many of the computed PCs enter the projection, so one
+PCA run can produce many PCs for other purposes while the statistic uses `K-1`.
+The analysis reads `pcs.eigvecs` without rerunning PCA; `--read-U path` can
+supply that file directly. By default it uses all reference columns; `-k`
+selects a leading subset, as in the other two-stage analyses (`-P/--USV`).
+The reference must contain the same samples in the same order as the genotype
+input. The IIDs in `pcs.eigvecs2`, which a PCA of PLINK or PGEN input writes
+beside `pcs.eigvecs`, are compared with the `.fam`/`.psam`, and a mismatch is an
+error. Without that file only the number of rows is checked, with a warning.
+Apply the desired `--maf` filter
+again in the analysis stage.
+
+For biobank-scale cohorts, where an `N x N` matrix does not fit,
+`--evaladmix-kin <cutoff>` writes only the pairs above a kinship cutoff, plus an
+unrelated set, in memory bounded by `-m`. See
+[Biobank scale](#biobank-scale---evaladmix-kin).
 
 ## What it estimates
 
@@ -54,8 +69,8 @@ most important setting — see
 
 ## Why no residual matrix is needed
 
-Assuming no missing genotypes, `Rtilde' Rtilde` can be written without ever
-forming `R`:
+With missing calls imputed (see [Missing genotypes](#missing-genotypes)),
+`Rtilde' Rtilde` can be written without ever forming `R`:
 
 ```
 Rtilde' Rtilde = (I-P) [ G'G - M gbar gbar' ] (I-P)
@@ -68,10 +83,25 @@ so the statistic depends on the data only through three quantities:
 - `Dhat`, the per-sample mean heterozygosity.
 
 All three are accumulations over sites, so **one streaming pass** suffices.
-Memory is `O(N^2)`, independent of the number of sites, which is what makes the
-approach usable out-of-core. Cost is one `O(MN^2)` accumulation — the same order
-as the covariance matrix a PCA already forms — plus an `O(N^3)` tail. On 126
-samples x 102k sites the statistic takes **0.12 s** on top of a 0.54 s PCA.
+Memory is one `N x N` matrix, independent of the number of sites, which is what
+makes the approach usable out-of-core. Cost is one `O(MN^2)` accumulation — the
+same order as the covariance matrix a PCA already forms. Everything after it is
+`O(N^2 k)`: `P` has rank `k+1`, so each product with `I-P` is a rank-`k+1`
+correction and `I-P` itself is never formed.
+
+Measured with 2 threads on simulated genotypes, whole runs (PCA included, so
+peak memory includes the PCA's), against the first implementation, which
+multiplied by a dense `N x N` `I-P` and held four `N x N` matrices:
+
+| samples x sites | before | now |
+|---|---|---|
+| 4,000 x 20,000 | 24.2 s, 1.15 GB | 10.1 s, 0.90 GB |
+| 4,000 x 20,000, 5% missing | 24.7 s, 1.15 GB | 17.4 s, 1.16 GB |
+| 8,000 x 10,000 | 109.8 s, 2.67 GB | 17.8 s, 1.65 GB |
+
+At 8,000 samples, everything after the pass took 95 s and now takes 3 s, most
+of it writing the two 600 MB files. The output is byte-identical on complete
+data. Missing genotypes double the pass, because of the pair counts.
 
 The identity was verified numerically against forming the residuals directly
 (agreement to 1e-15).
@@ -91,6 +121,30 @@ after `--maf 0.05`, a known pedigree with ten pairs per relationship class):
 | first cousin | 0.0625 | 0.0622 |
 | second cousin | 0.0156 | 0.0177 |
 | unrelated (7815 pairs) | 0 | −0.0016 |
+
+## Detecting related pairs
+
+The tables above measure how close the estimates are. A relatedness screen asks
+something coarser: is the pair related, and to what degree? With the KING degree
+bins (Manichaikul et al. 2010), extended to a 5th-degree bin, 0.0110–0.0221, for
+the second cousins:
+
+| method | degree right, duplicate … first cousin | second cousins | unrelated called ≥ 5th degree | max unrelated |
+|---|---|---|---|---|
+| **`PCAone --evaladmix`** | 50/50 | **10/10** | 0 | 0.0093 |
+| evalAdmix (EM) | 50/50 | 10/10 | 0 | 0.0092 |
+| evalAdmix (proj) / PCA + projection (R) | 50/50 | 10/10 | 0 | 0.0092 / 0.0093 |
+| RelateAdmix | 50/50 | 7/10 | 0 | 0.0038 |
+| PC-Relate | 50/50 | 7/10 | 1 of 7815 | 0.0120 |
+| PC-Relate, `small.samp.correct=FALSE` | 50/50 | 8/10 | 4 of 7815 | 0.0132 |
+
+No unrelated pair reaches the 4th-degree bin under any method, and every method
+separates every class from the unrelated pairs (AUC = 1, except 0.997 for second
+cousins under uncorrected PC-Relate). **On complete data this benchmark is
+saturated:** it cannot rank the methods on detection, only on the second-cousin
+boundary, where RelateAdmix's attenuation and PC-Relate's scatter cost three pairs
+each. What moves the calls is missing data — see
+[Missing genotypes](#missing-genotypes).
 
 ## How it compares with the other evalAdmix routes
 
@@ -164,6 +218,53 @@ Every number in these tables is produced by
 [`scripts/benchmark/`](../scripts/benchmark/) — see
 [reproducing-the-benchmark.md](reproducing-the-benchmark.md).
 
+## Missing genotypes
+
+Missing calls are imputed to the site mean by the readers, which keeps the
+projection defined. Left there, they cost the estimator its calibration: an
+imputed call carries no relatedness, so the covariance of a pair runs over the
+sites both are genotyped at while each variance runs over its own, and the
+estimate shrinks by `n_ij / sqrt(n_i n_j)` — by the missing fraction when calls
+are missing at random. `--evaladmix` therefore
+
+1. **replaces each missing call by its fit from the PCs**, `(QQ'g)_i`. At the
+   site mean a missing call keeps a residual `f − π_i`, its ancestry deviation,
+   which two samples share when they miss the same sites — a genotyping batch;
+2. **rescales each pair by `sqrt(n_i n_j) / n_ij`**, the pair counts accumulated
+   in the same pass. Pairwise, not per sample: with a per-sample factor
+   `1/sqrt(o_i o_j)` instead, pairs in the same batch came out 23% too high in
+   a batch design like the one below.
+
+The benchmark data with calls masked (`run_all.sh` step 6), `K−1 = 1` PC,
+related pairs:
+
+| missing calls | RMSE, before | **RMSE, now** | evalAdmix (EM) | degree right, before → now (EM) |
+|---|---|---|---|---|
+| none | 0.00251 | 0.00251 | 0.00292 | 60/60 → 60/60 (60/60) |
+| 5% at random | 0.01215 | **0.00263** | 0.00301 | 60 → 60 (60) |
+| 10% at random | 0.02546 | **0.00261** | 0.00302 | 60 → 60 (60) |
+| 20% at random | 0.05213 | **0.00303** | 0.00337 | 59 → 58 (58) |
+| 0–40% by sample | 0.05886 | **0.00325** | 0.00340 | **49 → 60** (60) |
+| 25% by batch | 0.04697 | **0.00328** | 0.00331 | **54 → 58** (60) |
+
+Before, the estimate was 0.79 of the truth at 20% missing, and in the batch
+design 0.73 of it for pairs in different batches but 0.98 within one — the
+missing fraction a pair does not share. The degree calls failed accordingly:
+with 0–40% missing per sample, one duplicate pair was called 1st degree, five
+parent–offspring and full-sib pairs 2nd degree, and two pairs each of half sibs
+and first cousins a degree too distant. Now every design is within 0.99
+of the truth and as accurate as evalAdmix's pairwise-complete EM, and every
+remaining miss is a second cousin at 0.0223–0.0233, just over the 0.0221 bin
+edge, as EM's are at 20%. RMSE on unrelated pairs rises as it should with fewer
+sites, and matches EM's within 6% (0.00389–0.00425 against 0.00382–0.00404).
+
+The cost is a second `N x N` matrix for the pair counts and about twice the time
+for the pass; complete data allocates nothing and is unchanged. `--evaladmix-kin`
+counts the same pairs from the lists of missing calls instead, which costs
+next to nothing at biobank call rates. Sites whose
+frequency is exactly 0.5 (0.1–0.2% here) are left out of both steps: there a
+heterozygous call and a missing one look the same once centred.
+
 ## Getting the number of PCs wrong is the dominant risk
 
 Far more important than the choice of method. With `K=2`, one PC is correct:
@@ -193,8 +294,112 @@ inflate to 0.66 while parent–offspring stays at 0.251 and first cousins at 0.0
 r = 0.999955 over all 7875 pairs, identical RMSE on related non-duplicate pairs.
 The only entries differing by more than 1.6e-04 are the ten duplicate pairs,
 where this implementation applies the `[-1,1]` clip and the R reference does not.
-In-core and out-of-core runs, and `--evaladmix-k 1` against a `-k 1` run, agree
+In-core and out-of-core runs, and `-k 1` on a 4-PC reference against a 1-PC run, agree
 exactly.
+
+## Biobank scale: `--evaladmix-kin`
+
+The dense output does not scale: at N = 245,000 (All of Us srWGS) the Gram
+matrix alone is 480 GB of RAM, and each text file is about 540 GB.
+`--evaladmix-kin <cutoff>` computes the same statistic within `-m` and writes
+only the pairs whose kinship reaches the cutoff:
+
+```bash
+PCAone -b cohort -k 16 -m 64 -o pcs
+PCAone -b cohort -P pcs -k <K-1> --evaladmix --evaladmix-kin 0.0442 -m 64 -o rel
+```
+
+writes
+
+- `rel.kin0`, one line per pair with kinship >= the cutoff, ordered by the
+  first sample and then the second, both in file order:
+  `#FID1 IID1 FID2 IID2 NSNP KINSHIP` (`#IID1 IID2 NSNP KINSHIP` for a `.psam`
+  without FID). `KINSHIP` is the entry `.kinship` would have, to the printed
+  digit. `NSNP` is the number of sites where both samples are genotyped. A
+  missing call at a site whose frequency is exactly 0, 0.5 or 1 cannot be
+  detected (see [Missing genotypes](#missing-genotypes)), so it counts as
+  genotyped;
+- `rel.unrelated`, a maximal set of samples without a pair at or above
+  `--evaladmix-unrelated` (default: the cutoff), as `FID IID` lines for
+  `--keep`. It uses the greedy rule of Hail's `maximal_independent_set` (which
+  All of Us used) and plink2's `--king-cutoff`: drop the sample with the most
+  relatives left until none has any, breaking ties by more missing calls, then
+  take back every dropped sample whose relatives were all dropped. A sample
+  genotyped at none of the sites has no estimate, so it is left out, with a
+  warning.
+
+The log reports each stripe with an estimate of the time left, and counts the
+pairs per KING degree bin. It also compares the scatter of unrelated pairs with
+chance. Kinship of unrelated pairs has an sd of about `0.5 / sqrt(Meff)` when
+the PCs fit, where `Meff = (sum v)^2 / sum v^2` with `v = f(1-f)` per site
+(divided by the mean share of the sites a sample is genotyped at).
+The pairs below 0 contain no relatives, so their root mean square measures the
+scatter. On the simulations below the two agree to within 0.3% (0.00761
+against 0.00761 at N = 20,000). That gives two warnings:
+
+- the scatter is more than 1.3 times chance: the PCs leave structure, as with
+  one PC too few (1.47 times) — see
+  [Getting the number of PCs wrong](#getting-the-number-of-pcs-wrong-is-the-dominant-risk);
+- chance alone should put more than a tenth as many unrelated pairs above the
+  cutoff as were written: the cutoff is within the noise of the sites. At N =
+  8,000 with 5,000 sites, a cutoff of 0.0221 is 2.9 sd, and chance predicts
+  60,285 of the 62,505 pairs written.
+
+A cutoff of 0.0442 keeps
+3rd degree and closer; All of Us used 0.1 for its unrelated set. Choose the
+cutoff with the rerun in mind, since a rerun repeats the whole computation:
+for example, write the pairs from 0.0221 and build the unrelated set at 0.1.
+
+**How.** In `corres_ij = sb_i sb_j S_ij - (L R')_ij` only `S_ij` is a pair
+quantity. Every other term is per sample, including `T = S Q = G(G'Q) - M gbar (gbar'Q)`,
+so one pass over the genotypes collects them in `O(NMr)`. The pairs are then
+computed in stripes of samples, each holding `S(j, i)` for the stripe's samples
+`i` and every `j > i`. Each stripe is one matrix product of the stripe's rows
+of `G` with the rows from the stripe down, and one more pass over the genotypes:
+from RAM without `-m`, from the file with `-m`. The stripes are sized to fit in
+`-m`, so the total work is still the dense path's single `O(N^2 M)` Gram
+product, split into pieces. With missing genotypes, the sites a pair has in
+common, `n_ij = n - m_i - m_j + mm_ij`, need `mm_ij`, the sites both samples
+miss. That count comes from the lists of missing calls, not from a second
+`N x N` product. At biobank call rates nearly every site has a missing call,
+but only a few samples miss each one. A site missing in a large share of the
+stripe falls back to a product of missing indicators.
+
+**Memory.** `-m` bounds the stripes, the genotype block and the working
+buffers. Peak RSS was at most 20 MB above `-m` in every run below. Without `-m` the
+genotypes are held in RAM, as in the dense path, and the stripes take up to
+2 GB. A small `-m` only costs extra passes over the genotypes.
+
+**Checks.** On every test set, the `.kin0` of a cutoff of -0.5 (all pairs)
+matches `.kinship` character for character. That held in-core, with `-m` (1 to
+9 stripes), with and without missing genotypes (including sites missing 30% of
+calls), and for BED and PGEN input: 32 million pairs at N = 8,000, plus the
+smaller sets in `tests/test_evaladmix_pairs.py`. The dense output is
+byte-identical to the previous version.
+
+Measured with 2 threads on x86-64. The data are simulated 3-way admixture with
+5,000 unlinked sites, 1.4% missing calls (one sample in five at three times the
+rate) and planted relatives, and `-k 2`. Time and peak RSS are for the
+`--evaladmix` run alone:
+
+| samples | dense `--evaladmix` | `--evaladmix-kin 0.0442` |
+|---|---|---|
+| 8,000 | 12.4 s, 1.45 GB, plus two 0.6 GB files | 6.4 s at `-m 1` (1.01 GB, 2 stripes); 11.7 s at `-m 0.3` (0.32 GB, 9 stripes) |
+| 20,000 | needs 6 GB of RAM for its two N x N matrices, and writes two 3.6 GB files | 39.5 s at `-m 1` (1.02 GB, 5 stripes); 32.4 s at `-m 2` (2.00 GB, 3 stripes) |
+
+At N = 20,000 every planted pair is found: 40/40 duplicates (mean 0.4996),
+2,400/2,400 parent–offspring and full-sib pairs (0.2499), and 100/100 half sibs
+(0.1244). One of the 2 x 10^8 unrelated pairs reaches 0.0442 (0.0446), which is
+expected with 5,000 sites. The `.unrelated` set drops 1,041 of the 2,182 samples
+with relatives. On the planted families that is the minimum possible: one per
+duplicate, and the children of each family.
+
+**Extrapolation (not measured).** The cost is `N^2 M` flops: 9 x 10^15 for
+N = 245,000 and M = 150,000 LD-pruned sites. The stripes above ran at about
+28 GFLOP/s per core, counting reading, imputation and output. At that rate, 64
+cores would take about 1.4 hours, and `-m 64` makes 5 to 10 passes over the
+9 GB `.bed`. Linking MKL or OpenBLAS
+(`Makefile`) usually speeds up the products further.
 
 ## Implementation notes
 
@@ -202,17 +407,23 @@ exactly.
   `g/2`. Since `bhat` and `chat` are each converted to correlations, the constant
   factor cancels and no rescaling is needed.
 
-- **Centring.** The out-of-core block reader always returns *centred* genotypes,
-  ignoring `params.center`, and estimates `F` on the fly — so `F` and
-  `centered_geno_lookup` are allocated before the loop and the centring is undone
-  to recover heterozygosity. `A` and `gbar` need no correction: per-site centring
-  subtracts `c_s * 1` from column `s`, and every resulting term carries a factor
-  `(I-P)1 = 0` because the projection contains the intercept. The in-core path
-  runs with `center = false` and is already raw.
+- **Centring.** Both paths read *centred* genotypes with missing calls imputed
+  to the site mean (centred value 0): with `center = false` the in-core readers
+  would leave missing calls as −9. The out-of-core block reader estimates `F` on
+  the fly, so `F` and `centered_geno_lookup` are allocated before the loop. The
+  centring is undone to recover heterozygosity. `A` and `gbar` need no
+  correction: per-site centring subtracts `c_s * 1` from column `s`, and every
+  resulting term carries a factor `(I-P)1 = 0` because the projection contains
+  the intercept.
+
+- **Finding the missing calls.** An imputed call is an exact 0 in the centred
+  genotypes, and an observed one is 0 only if it equals the site frequency, which
+  needs `f` in {0, 0.5, 1}. So the pair counts use every other site, with no
+  change to the readers.
 
 - **`read_usv()`.** The PC scores are read with `Utils::read_usv()`, which this
-  branch also fixes — see [read-usv-fix.md](read-usv-fix.md). `--evaladmix-k` is
-  a direct regression test for that bug.
+  branch also fixes — see [read-usv-fix.md](read-usv-fix.md). `-k` below the
+  reference's PC count is a direct regression test for that bug.
 
 ## Getting (k0, k1, k2)
 
@@ -232,14 +443,26 @@ tool needs in order to apply the same site filter.
 
 ## Limitations
 
-- PLINK bed / PLINK2 pgen input only.
-- **Complete data is assumed.** With missingness, evalAdmix skips sites absent in
-  *either* member of a pair, so each pair sees a different site set, `G'G` is no
-  longer a sufficient summary, and pairwise site counts would have to be
-  accumulated alongside it.
+- PLINK bed / PLINK2 pgen input only, diploid (`--haploid` is refused).
+- **The dense output needs `N x N` memory and two `N x N` text files**; use
+  `--evaladmix-kin` beyond a few tens of thousands of samples.
+- **Missing genotypes cost the dense output a second `N x N` matrix and double
+  the pass.** The
+  rescaling by sites in common corrects the covariance, not the variances: the
+  imputed calls still leave a small structural residual in each sample's
+  variance. That is second order at the missingness tested here (up to 40% per
+  sample), but a pair never genotyped at the same site has no estimate and is
+  written as `nan` (left out of `.kin0`, with a warning).
+- `--evaladmix-kin` holds the pair counts in float, so it refuses more than
+  2^24 (16.8 million) sites with missing calls. It can only report pairs at or
+  above the cutoff it was run with.
+- Without `.eigvecs2` (e.g. scores given with `--read-U` from another program)
+  only the number of rows of the reference is checked.
 - `Dhat` assumes Hardy–Weinberg within individuals, so inbred samples need care.
+  A sample with no heterozygous call is warned about.
 - `--maf` with out-of-core is rejected by PCAone itself, unrelated to this
   feature.
-- Tested on one dataset: 126 samples, complete genotypes, K=2, PLINK input,
-  in-core and out-of-core. Not tested on pgen, or at a scale where the `O(N^2)`
-  memory matters.
+- Tested on one dataset: 126 samples, K=2, PLINK and PGEN input, in-core and
+  out-of-core, complete and with five missingness patterns. Speed and memory
+  are measured on simulated data up to N = 8,000, and for `--evaladmix-kin` up
+  to N = 20,000. The All of Us cost above is an extrapolation.

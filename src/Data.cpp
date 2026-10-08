@@ -6,6 +6,8 @@
 
 #include "Data.hpp"
 
+#include <omp.h>
+
 #include "Cmd.hpp"
 #include "Kinship.hpp"
 #include "Utils.hpp"
@@ -39,32 +41,63 @@ void Data::prepare() {
     return;
   }
 
-  // some common settings for out-of-core
-  if (params.dopca) {
+  // LD and evalAdmix keep dopca on to estimate F, but run no PCA.
+  // Size their blocks like any other non-PCA run.
+  const bool pca_blocks = params.dopca && !params.ld && !params.evaladmix;
+  const bool exact = pca_blocks && params.svd_t == SvdType::FULL;
+  if (exact) {
+    // exact PCA (Exact.cpp): the N x N GRM and F, plus the loadings for -V,
+    // are held besides one block. Without -m, blocks of ~64 MB (and at least
+    // 2048 sites) keep the GRM update a large matrix product.
+    const double n = std::max(1u, nsamples);
+    const double fixed = n * n + 6.0 * nsnps + (params.printv ? (double)nsnps * params.k : 0.0);
+    double b = std::max(2048.0, 8388608.0 / n);
+    if (params.memory > 0) {
+      if (params.memory * 134217728 > 1.1 * fixed + 64 * n)
+        b = (params.memory * 134217728 - fixed) / n;
+      else
+        cao.warn("the exact PCA needs at least", fixed / 134217728, " GB for the", nsamples, " x", nsamples,
+                 " GRM. -m is too small, using blocks of", (uint64)std::ceil(b), " sites");
+    }
+    blocksize = (uint)std::min<double>(std::max(1.0, std::ceil(b)), std::max(1u, nsnps));
+  } else if (pca_blocks) {
     if (params.svd_t == SvdType::IRAM) {
       // ram of arnoldi = n * b * 8 / 1024 kb
       blocksize = (uint)ceil((double)params.memory * 134217728 / nsamples);
     } else {
       // ram of halko = (3*n*l + 2*m*l + 5*m + n*b)*8/1024 Kb
-      uint l = params.k + params.oversamples;
-      double m = (double)(3 * nsamples * l + 2 * nsnps * l + 5 * nsnps) / 134217728;
+      // in doubles: the unsigned products wrapped once nsnps * l reached 2^31
+      const double l = (double)params.k + params.oversamples;
+      const double fixed = 3.0 * nsamples * l + 2.0 * nsnps * l + 5.0 * nsnps;  // doubles held besides the block
+      double m = fixed / 134217728;
       if (params.memory > 1.1 * m)
         m = 0;
       else
         cao.warn("minimum RAM required is ", m, " GB. trying to allocate more RAM.");
-      blocksize = (unsigned int)ceil(
-          (double)((m + params.memory) * 134217728 - 3 * nsamples * l - 2 * nsnps * l - 5 * nsnps) / nsamples);
+      blocksize = (unsigned int)ceil(((m + params.memory) * 134217728 - fixed) / nsamples);
     }
+  } else if (params.evaladmix_pairs) {
+    // --evaladmix-kin (EvalAdmix.cpp): the stripes of the N x N matrix take
+    // most of -m. A block only has to be wide enough for an efficient product
+    // with them: a fifth of -m, between 256 and 2048 sites. More would only take
+    // room from the stripes, i.e. add passes over the genotypes.
+    const double b = 0.2 * params.memory * 134217728 / std::max(1u, nsamples);
+    blocksize = (uint)std::min<double>(std::max(1u, nsnps), std::max(256.0, std::min(2048.0, std::floor(b))));
   } else {
     // ram of non-pca run
     blocksize = (uint)ceil((double)params.memory * 134217728 / nsamples);
   }
 
   nblocks = (unsigned int)ceil((double)nsnps / blocksize);
-  cao.print(tick.date(), "initial setting by -m/--memory: blocksize =", blocksize, ", nblocks =", nblocks,
-            ", factor =", bandFactor);
-  if (nblocks == 1) cao.error("only one block exists. please remove -m option");
-  if (params.dopca && params.svd_t == SvdType::PCAoneAlg2) {
+  if (exact) {
+    cao.print(tick.date(), "blocks for the exact PCA: blocksize =", blocksize, ", nblocks =", nblocks);
+  } else {
+    cao.print(tick.date(), "initial setting by -m/--memory: blocksize =", blocksize, ", nblocks =", nblocks,
+              ", factor =", bandFactor);
+    // the passes of --evaladmix-kin read the blocks again, however many there are
+    if (nblocks == 1 && !params.evaladmix_pairs) cao.error("only one block exists. please remove -m option");
+  }
+  if (pca_blocks && params.svd_t == SvdType::PCAoneAlg2) {
     // decrease blocksize for the winSVD
     if (nblocks < params.bands) {
       blocksize = (unsigned int)ceil((double)nsnps / params.bands);
@@ -90,6 +123,7 @@ void Data::filter_snps_resize_F() {
   if (!params.filterSNP) return;
   if (!(params.maf > 0 && params.maf <= 0.5)) cao.error("--maf has to be between (0, 0.5)");
 
+  nsnps_all = F.size();
   Mat1D Fnew(F.size());  // make a temp F
   int i, j;
   for (i = 0, j = 0; j < (int)F.size(); j++) {
@@ -127,7 +161,8 @@ void Data::save_snps_in_mbim() {
     return false;
   };
   const bool metadata_is_permuted =
-      params.file_t == FileType::PLINK && params.perm && params.out_of_core && perm.indices().size() == nsnps;
+      params.file_t == FileType::PLINK && params.perm && params.out_of_core && perm.indices().size() == nsnps &&
+      !logical_bed_perm;
   const bool frequency_is_permuted = params.perm && params.out_of_core && perm.indices().size() == nsnps;
 
   if (!params.filterSNP && !params.perm) {
@@ -216,6 +251,17 @@ void Data::calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, M
 
 // S: signular values
 // E: eigen values
+void Data::set_svd_transform(bool standardized) {
+  // standardize_E() is a no-op unless params.scale is the genetic default, so a
+  // decomposition that "standardized" under any other --scale did not actually
+  // get the sqrt(ploidy)/sd transform that -P knows how to undo.
+  svd_scale = (standardized && params.scale == SCALE_STANDARDIZE_GENETIC) ? SCALE_STANDARDIZE_GENETIC : params.scale;
+  if (!standardized && params.scale == SCALE_STANDARDIZE_GENETIC) svd_scale = 0;  // centred only
+  // fit_with_pi() builds the pcangsd matrix as dosage - 2f, on the 0..2 scale,
+  // rather than PCAone's usual 0..1 coding.
+  svd_gscale = params.pcangsd ? 2 : 1;
+}
+
 void Data::write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, const Mat2D& V) {
   std::ofstream outs(params.fileout + ".sigvals");
   std::ofstream oute(params.fileout + ".eigvals");
@@ -232,7 +278,10 @@ void Data::write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, cons
     outu << U.format(fmt) << '\n';
   }
   if (outs.is_open()) {
-    outs << '#' << U.rows() << ',' << V.rows() << '\n';
+    // key=value fields are appended after nsamples,nsnps; older PCAone parses
+    // the first two with stoi and ignores the rest. See UsvTransform.
+    outs << '#' << U.rows() << ',' << V.rows() << ",scale=" << svd_scale << ",ploidy=" << params.ploidy
+         << ",gscale=" << svd_gscale << '\n';
     outs << S.format(fmt) << '\n';
   }
   if (oute.is_open()) oute << E.format(fmt) << '\n';
@@ -256,109 +305,43 @@ void Data::write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, cons
   cao.print(tick.date(), "eigen vectors and values saved");
 }
 
-void Data::write_residuals(const Mat1D& S, const Mat2D& U, const Mat2D& VT) {
-  // we always filter snps for in-core mode
-  if (params.ld_stats == 1) {
-    cao.print(tick.date(), "ld-stats=1: calculate standardized genotype matrix!");
-  } else {
-    cao.print(tick.date(), "ld-stats=0: calculate the ancestry adjusted LD matrix!");
-  }
-  std::setlocale(LC_ALL, "C");
-  std::ios_base::sync_with_stdio(false);
-  std::ofstream ofs(params.fileout + ".residuals", std::ios::binary);
-  const uint64 ibyte = 4;
-  const uint64 magic = ibyte * 2;
-  uint64 bytes_per_snp = nsamples * ibyte;
-  ofs.write((char*)&nsnps, ibyte);
-  ofs.write((char*)&nsamples, ibyte);
-  Eigen::VectorXf fg;
-  uint64 idx;
-  if (!params.out_of_core) {
-    if (params.ld_stats == 0) G -= U * S.asDiagonal() * VT;  // get residuals matrix
-    G.rowwise() -= G.colwise().mean();                       // Centering
-    for (Eigen::Index ib = 0; ib < G.cols(); ib++) {
-      fg = G.col(ib).cast<float>();
-      if (params.perm) {
-        idx = magic + (uint64)perm.indices()[ib] * bytes_per_snp;
-        ofs.seekp(idx, std::ios_base::beg);
-      }
-      ofs.write((char*)fg.data(), bytes_per_snp);
-    }
-  } else {
-    check_file_offset_first_var();
-    int i = 0;
-    for (uint b = 0; b < nblocks; ++b) {
-      read_block_initial(start[b], stop[b], false);
-      // G (nsamples, actual_block_size)
-      if (params.ld_stats == 0) G -= U * S.asDiagonal() * VT.middleCols(start[b], G.cols());
-      G.rowwise() -= G.colwise().mean();  // Centering
-      for (Eigen::Index ib = 0; ib <= stop[b] - start[b]; ib++, i++) {
-        fg = G.col(ib).cast<float>();
-        if (params.perm) {
-          idx = magic + (uint64)perm.indices()[i] * bytes_per_snp;
-          ofs.seekp(idx, std::ios_base::beg);
-        }
-        ofs.write((char*)fg.data(), bytes_per_snp);
-      }
-    }
-  }
-
-  save_snps_in_mbim();
-  cao.print(tick.date(), "the LD matrix and SNPs info are saved");
-}
-
 void Data::fit_with_pi(const Mat2D& U, const Mat1D& svals, const Mat2D& VT) {
   if (params.verbose >= 3) cao.print(tick.date(), "call fit_with_pi");
   uint ks = svals.size();
   if (params.pcangsd) {  // for pcangsd with beagle input
-#pragma omp parallel for
-    for (uint j = 0; j < nsnps; ++j) {
+    const Mat2D US = U * svals.asDiagonal();
+    for_each_product_column(US, VT, 0, nsnps, [&](Eigen::Index jj, const auto& recon) {
+      const uint j = (uint)jj;
       double p0, p1, p2;
-      uint s = params.filterSNP ? keepSNPs[j] : j;
+      const uint original = unpermuted_snp_index(j);
+      const double f = F(original);
+      uint s = params.filterSNP ? keepSNPs[original] : original;
       for (uint i = 0; i < nsamples; ++i) {
         // Rescale individual allele frequencies
-        double pt = 0.0;
-        for (uint k = 0; k < ks; ++k) {
-          pt += U(i, k) * svals(k) * VT(k, j);
-        }
-        pt = (pt + 2.0 * F(j)) / 2.0;
+        double pt = recon(i);
+        pt = (pt + 2.0 * f) / 2.0;
         pt = fmin(fmax(pt, 1e-4), 1.0 - 1e-4);
         // update E, which is G here
         p0 = P(2 * i + 0, s) * (1.0 - pt) * (1.0 - pt);
         p1 = P(2 * i + 1, s) * 2 * pt * (1.0 - pt);
         p2 = (1 - P(2 * i + 0, s) - P(2 * i + 1, s)) * pt * pt;
-        G(i, j) = (p1 + 2.0 * p2) / (p0 + p1 + p2) - 2.0 * F(j);
+        G(i, j) = (p1 + 2.0 * p2) / (p0 + p1 + p2) - 2.0 * f;
       }
-    }
+    });
   }
 
-  if (params.emu && params.perm) {  // for emu with permuted data, -d 2
+  if (params.emu) {
 #pragma omp parallel for
     for (uint i = 0; i < nsnps; ++i) {
+      const uint original = unpermuted_snp_index(i);
+      const double f = F(original);
       for (uint j = 0; j < nsamples; ++j) {
-        if (C[perm.indices()[i] * nsamples + j])  // no bool & 1
-        {                                         // sites need to be predicted
+        if (C[(uint64)original * nsamples + j]) {  // sites need to be predicted
           G(j, i) = 0.0;
           for (uint k = 0; k < ks; ++k) {
             G(j, i) += U(j, k) * svals(k) * VT(k, i);
           }
-          G(j, i) = fmin(fmax(G(j, i), -F(i)), 1 - F(i));
-        }
-      }
-    }
-  }
-
-  if (params.emu && !params.perm) {  // for emu without permuted data, -d 0
-#pragma omp parallel for
-    for (uint i = 0; i < nsnps; ++i) {
-      for (uint j = 0; j < nsamples; ++j) {
-        if (C[i * nsamples + j])  // no bool & 1
-        {                         // sites need to be predicted
-          G(j, i) = 0.0;
-          for (uint k = 0; k < ks; ++k) {
-            G(j, i) += U(j, k) * svals(k) * VT(k, i);
-          }
-          G(j, i) = fmin(fmax(G(j, i), -F(i)), 1 - F(i));
+          G(j, i) = fmin(fmax(G(j, i), -f), 1 - f);
         }
       }
     }
@@ -370,7 +353,7 @@ void Data::standardize_E() {
   if (params.scale != -9) return;
 #pragma omp parallel for
   for (uint i = 0; i < nsnps; ++i) {
-    const double f = F(i);
+    const double f = F(unpermuted_snp_index(i));
     const double sd = sqrt(f * (1.0 - f));
     if (sd > VAR_TOL) {  // in case denominator is too small.
       G.col(i) *= sqrt((double)params.ploidy) / sd;
@@ -378,49 +361,105 @@ void Data::standardize_E() {
   }
 }
 
+// Decide how to scale a target genotype matrix so it matches the matrix a
+// reference PCA decomposed.
+//
+// Before the transform was recorded in .sigvals, projection and selection
+// scaled their G from this run's --scale, which silently mismatched whenever
+// the reference had used anything else. That included the case where the user
+// passed no --scale at all: a reference built with -D/--ld has standardisation
+// turned off, and -D is a documented way to get the .mbim that -P needs.
+bool Data::resolve_ref_scaling(const UsvTransform& t, const std::string& src, bool allow_dosage) const {
+  if (!t.known) {
+    cao.warn(src,
+             " predates the recording of the PCA scaling, so the reference is assumed to have used this run's "
+             "-C/--scale. that is wrong if the reference was built with -D/--ld, or with a non-default --scale; "
+             "rerun it to record the transform.");
+    return params.scale == SCALE_STANDARDIZE_GENETIC;
+  }
+  if (t.scale > 0)
+    cao.error("the reference PCA used -C/--scale ", t.scale,
+              ", which cannot be replayed on the target genotypes here");
+  if (t.gscale != 1 && !(allow_dosage && t.gscale == 2))
+    cao.error("the reference PCA decomposed dosages on the 0..2 scale (gscale=", t.gscale,
+              "), which is not the 0..1 coding used here. this combination was silently mis-scaled before; "
+              "rerun the reference on the same genotype coding");
+  // mirrors FileUSV::check_transform(): standardize_E() and
+  // pcangsd_standardize_E() disagree on what this matrix is, so it has no inverse
+  if (t.gscale == 2 && t.scale == SCALE_STANDARDIZE_GENETIC)
+    cao.error("the reference PCA standardised a dosage-scale matrix (gscale=2, scale=-9), which cannot be "
+              "replayed on the target here. rerun the reference PCA so it decomposes centred dosages");
+  if (t.ploidy != params.ploidy)
+    cao.error("the reference PCA used ploidy ", t.ploidy, " but this run uses ", params.ploidy,
+              "; pass --haploid consistently");
+  const bool standardize = (t.scale == SCALE_STANDARDIZE_GENETIC);
+  cao.print(tick.date(), "scaling the target genotypes as the reference did:",
+            standardize ? "standardized" : (t.gscale == 2 ? "centred dosages (0..2)" : "centred only"),
+            "(scale =", t.scale, ", ploidy =", t.ploidy, ", gscale =", t.gscale, ")");
+  if (params.scale != t.scale)
+    cao.warn("-C/--scale ", params.scale, " is ignored here; the scaling is taken from the reference PCA");
+  return standardize;
+}
+
+// standardize_E() but driven by the reference's transform rather than this
+// run's --scale, and using the reference's ploidy.
+void Data::standardize_E_ref(const UsvTransform& t) {
+  const double rploidy = sqrt((double)t.ploidy);
+#pragma omp parallel for
+  for (uint i = 0; i < nsnps; ++i) {
+    const double f = F(i);
+    const double sd = sqrt(f * (1.0 - f));
+    if (sd > VAR_TOL) G.col(i) *= rploidy / sd;
+  }
+}
+
+// the same, for one out-of-core block already read unstandardized
+void Data::standardize_block_ref(const UsvTransform& t, uint64 start_idx, uint block_cols) {
+  const double rploidy = sqrt((double)t.ploidy);
+#pragma omp parallel for
+  for (uint i = 0; i < block_cols; ++i) {
+    const double f = F(start_idx + i);
+    const double sd = sqrt(f * (1.0 - f));
+    if (sd > VAR_TOL) G.col(i) *= rploidy / sd;
+  }
+}
+
 void Data::pcangsd_standardize_E(const Mat2D& U, const Mat1D& svals, const Mat2D& VT) {
   if (params.scale != -9) return;
   cao.print(tick.date(), "begin to standardize the matrix for pcangsd procedure");
-  uint nk = svals.size();
-  Dc = Mat1D::Zero(nsamples);
-#pragma omp parallel
-  {
-    Mat1D diag_private = Mat1D::Zero(nsamples);  // Thread private vector;
-#pragma omp for
-    for (uint j = 0; j < nsnps; j++) {
+  const Mat2D US = U * svals.asDiagonal();
+  Mat2D diag_threads = Mat2D::Zero(nsamples, omp_get_max_threads());  // a column per thread
+  for_each_product_column(US, VT, 0, nsnps, [&](Eigen::Index jj, const auto& recon) {
+    auto diag_private = diag_threads.col(omp_get_thread_num());
+    {
+      const uint j = (uint)jj;
       double p0, p1, p2, pt, pSum, tmp;
-      double norm = sqrt(2.0 * F(j) * (1.0 - F(j)));
-      uint s = params.filterSNP ? keepSNPs[j] : j;
+      const uint original = unpermuted_snp_index(j);
+      const double f = F(original);
+      double norm = sqrt(2.0 * f * (1.0 - f));
+      uint s = params.filterSNP ? keepSNPs[original] : original;
       for (uint i = 0; i < nsamples; i++) {
         // Rescale individual allele frequencies
-        pt = 0.0;
-        for (uint k = 0; k < nk; ++k) {
-          pt += U(i, k) * svals(k) * VT(k, j);
-        }
-        pt = (pt + 2.0 * F(j)) / 2.0;
+        pt = recon(i);
+        pt = (pt + 2.0 * f) / 2.0;
         pt = fmin(fmax(pt, 1e-4), 1.0 - 1e-4);
         // Update e
         p0 = P(2 * i + 0, s) * (1.0 - pt) * (1.0 - pt);
         p1 = P(2 * i + 1, s) * 2 * pt * (1.0 - pt);
         p2 = (1 - P(2 * i + 0, s) - P(2 * i + 1, s)) * pt * pt;
         pSum = p0 + p1 + p2;
-        G(i, j) = (p1 + 2 * p2) / pSum - 2.0 * F(j);
+        G(i, j) = (p1 + 2 * p2) / pSum - 2.0 * f;
         if (norm > VAR_TOL) G(i, j) /= norm;
 
         // Update diag
-        tmp = (0.0 - 2.0 * F(j)) * (0.0 - 2.0 * F(j)) * (p0 / pSum);
-        tmp += (1.0 - 2.0 * F(j)) * (1.0 - 2.0 * F(j)) * (p1 / pSum);
-        tmp += (2.0 - 2.0 * F(j)) * (2.0 - 2.0 * F(j)) * (p2 / pSum);
-        diag_private[i] += tmp / (2.0 * F(j) * (1.0 - F(j)));
+        tmp = (0.0 - 2.0 * f) * (0.0 - 2.0 * f) * (p0 / pSum);
+        tmp += (1.0 - 2.0 * f) * (1.0 - 2.0 * f) * (p1 / pSum);
+        tmp += (2.0 - 2.0 * f) * (2.0 - 2.0 * f) * (p2 / pSum);
+        if (norm > VAR_TOL) diag_private(i) += tmp / (2.0 * f * (1.0 - f));  // f = 0 gave inf
       }
     }
-#pragma omp critical
-    {
-      for (uint i = 0; i < nsamples; i++) {
-        Dc[i] += diag_private[i];  // Sum arrays for threads
-      }
-    }
-  }
+  });
+  Dc = diag_threads.rowwise().sum();  // in thread order, not in the order a critical section was entered
 }
 
 void Data::predict_missing_E(const Mat2D& U, uint64 start_idx, uint64 stop_idx) {
@@ -434,7 +473,7 @@ void Data::predict_missing_E(const Mat2D& U, uint64 start_idx, uint64 stop_idx) 
     // find non-missing samples
     Int1D idx, na_idx;
     for (uint i = 0; i < nsamples; i++) {
-      if (!C(j * nsamples + i))
+      if (!C((uint64)j * nsamples + i))
         idx.push_back(i);
       else
         na_idx.push_back(i);
