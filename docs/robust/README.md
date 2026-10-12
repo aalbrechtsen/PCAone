@@ -688,9 +688,13 @@ Output files:
 
   - `KIN_DETECT`: the kinship used by the method (it decides the pair and its weight);
 
-  - `KINSHIP K0 K1 K2`: the final relatedness from the final PCs (Section 6);
+  - `KINSHIP K0 K1 K2`: the final relatedness (Section 6). With `aarobust-kin` the individual allele frequencies come from the final PCP fit, with no $k$ (`--robust-iaf pcp`, the default): $\pi = f + W(g/2 - f)$, $W = L_t(L_t+S)^{-1}$, each related individual predicted from everyone outside its family. The other modes, and `--robust-iaf pcs`, use the regression on the top $k$ PCs with the family left out. In simulations PCP removes most of the upward bias of the PCs: the 1st-degree bias falls from +0.04 to +0.08 to at most +0.01, and the 2nd degree from +0.11 to +0.18 to +0.01 to +0.04, at $n=5$–20 per population (`report/pcp_pi`);
 
-  - `KIN_EVALADMIX`: the `--evaladmix` kinship of the pair.
+  - `KIN_EVALADMIX`: the `--evaladmix` kinship of the pair;
+
+  - `FAM_N`: the members of the pair's family (connected through the related pairs). If a family is a large part of its population, the allele frequencies, and so `KINSHIP` and `K0`–`K2`, are unreliable, and `KING` is the safer number.
+
+- `.inbred` (`aarobust-kin` with `--inbreed 2`): the inbreeding coefficient of each individual, $F = 1 - O/E$, from the PCP allele frequencies without the individual's own genotype (leave-one-out). The format is that of `--inbreed 2` with `-P`. It needs no $k$: with top-$k$ PCs, $F$ is biased down (−0.13 at $n=5$ with the true $k$), and more so with more PCs.
 
 In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 and 0.133, against pedigree values 0.25, 0.25, 0.5, 0.25, 0.125 and 0.125.
 

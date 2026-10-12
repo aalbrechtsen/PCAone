@@ -325,3 +325,20 @@ void run_inbred_samples(Data* Pi, const Param& params) {
   write_inbred_samples(params.fileout + ".inbred", ids, s, F);
   cao.print(tick.date(), "per-sample inbreeding coefficients saved to", params.fileout + ".inbred");
 }
+
+void write_inbred_sums(const Param& params, const Mat1D& obs, const Mat1D& exp, uint64 nsites) {
+  const std::vector<SampleName> ids = read_sample_names(params);
+  const Eigen::Index N = obs.size();
+  if ((Eigen::Index)ids.size() != N)
+    cao.error("found " + std::to_string(ids.size()) + " sample IDs for the " + std::to_string(N) +
+              " samples of the input");
+  HetSums s;
+  s.obs = obs;
+  s.exp = exp;
+  s.nsites.assign(N, nsites);
+  Mat1D F = Mat1D::Zero(N);
+  update_F(F, s);
+  write_inbred_samples(params.fileout + ".inbred", ids, s, F);
+  cao.print(tick.date(), "per-sample F: mean =", F.mean(), ", min =", F.minCoeff(), ", max =", F.maxCoeff(),
+            "; saved to", params.fileout + ".inbred");
+}

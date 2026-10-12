@@ -27,6 +27,7 @@
 #include <Spectra/SymEigsSolver.h>
 
 #include "Halko.hpp"
+#include "InbredSamples.hpp"
 #include "Kinship.hpp"
 #include "Utils.hpp"
 
@@ -825,7 +826,56 @@ void write_matrix(const std::string& fn, const Mat2D& M) {
 //             no leave-out, so biased low for large families at small N
 struct FinalRel {
   double kin = NAN, kin_ea = NAN, k0 = NAN, k1 = NAN, k2 = NAN;
+  int fam_n = 0;  // members of the pair's family (connected through the related pairs)
 };
+
+// Individual allele frequencies (IAF) from the final PCP fit of aarobust-kin
+// (--robust-iaf pcp; scripts/relatepca/pcp_pi.py, report/pcp_pi): no k. With S
+// the fitted noise diagonal + related pairs and lam, V the eigenpairs of
+// S^-1/2 C S^-1/2 (C the centred GRM), the structure part is
+// Lt = S^1/2 V diag(max(lam - 1, 0)) V' S^1/2 and the model covariance
+// Cm = Lt + S, so
+//   pi = f + W (g/2 - f),  W = Lt Cm^-1 = S^1/2 V diag(max(0, 1 - 1/lam)) V' S^-1/2,
+// the best linear prediction of each individual's structure part from the
+// genotypes. Strong ancestry directions get weight about 1, noise directions 0,
+// and relatives do not predict each other (their shared part is in S).
+// Without a set O (a family) the prediction of its members from the others is
+//   W_{O,K} - W_{O,O} (P_OO)^-1 P_{O,K},  P = Cm^-1, K = all but O,
+// so one eigendecomposition serves every family. S's eigenvalues are floored at
+// 1e-3 times its median diagonal (an MZ pair makes S singular).
+struct PcpIaf {
+  Mat2D W, P;
+};
+
+static PcpIaf pcp_iaf(const Mat2D& C, const Mat2D& S0) {
+  const Eigen::Index N = C.rows();
+  const Mat2D S = (S0 + S0.transpose()) / 2.0;
+  std::vector<double> dg(N);
+  for (Eigen::Index i = 0; i < N; ++i) dg[i] = S(i, i);
+  std::nth_element(dg.begin(), dg.begin() + N / 2, dg.end());
+  const double floor = 1e-3 * std::max(dg[N / 2], 1e-300);
+  Eigen::SelfAdjointEigenSolver<Mat2D> es(S);
+  const Mat1D e = es.eigenvalues().cwiseMax(floor);
+  const Mat2D& Q = es.eigenvectors();
+  const Mat2D Sh = Q * e.cwiseSqrt().asDiagonal() * Q.transpose();
+  const Mat2D Sih = Q * e.cwiseSqrt().cwiseInverse().asDiagonal() * Q.transpose();
+  Mat2D T = Sih * C * Sih;
+  T = (T + T.transpose()) / 2.0;
+  Eigen::SelfAdjointEigenSolver<Mat2D> el(T);
+  const Mat1D& lam = el.eigenvalues();
+  const Mat2D& V = el.eigenvectors();
+  Mat1D wts(N), inv(N);
+  for (Eigen::Index a = 0; a < N; ++a) {
+    wts(a) = std::max(0.0, 1.0 - 1.0 / std::max(lam(a), 1e-12));
+    inv(a) = 1.0 / (std::max(lam(a) - 1.0, 0.0) + 1.0);
+  }
+  PcpIaf out;
+  out.W = Sh * V * wts.asDiagonal() * V.transpose() * Sih;
+  out.P = Sih * V * inv.asDiagonal() * V.transpose() * Sih;
+  cao.print(tick.date(), "robust PCA: PCP individual allele frequencies, effective rank", wts.sum(), ",",
+            (lam.array() > 1.0).count(), "whitened eigenvalues above 1");
+  return out;
+}
 
 static inline double hwe_prob(int g, double p) {
   const double q = 1.0 - p;
@@ -966,10 +1016,12 @@ static void ml_ibd(const std::vector<double>& lik, size_t ns, double* k) {
 }
 
 static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, const Mat2D& U,
-                                               const std::vector<Pair>& pairs) {
+                                               const std::vector<Pair>& pairs, const PcpIaf* pcp = nullptr) {
   const Eigen::Index N = data->nsamples, k1 = U.cols() + 1, np = pairs.size();
   std::vector<FinalRel> out(np);
-  if (np == 0) return out;
+  // --inbreed 2 (aarobust-kin): F from the PCP IAF, leave-one-out, in the same pass
+  const bool doF = pcp && params.inbreed == 2;
+  if (np == 0 && !doF) return out;
   tick.clock();
   Mat2D V(N, k1);
   V.leftCols(k1 - 1) = U;
@@ -984,6 +1036,58 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
         members.push_back(x);
       }
   const Eigen::Index ni = members.size(), M = data->nsnps;
+  // families: connected components of the related pairs (union-find on the
+  // member index); with the PCs a family larger than max_family falls back to
+  // the pair (PCP: always the family)
+  const Eigen::Index max_family = 100;
+  std::vector<int> root(ni);
+  std::iota(root.begin(), root.end(), 0);
+  std::function<int(int)> find = [&](int x) { return root[x] == x ? x : root[x] = find(root[x]); };
+  for (const auto& [i, j, phi] : pairs) root[find(sub[i])] = find(sub[j]);
+  std::map<int, std::vector<int>> family;  // root -> member indices (into members)
+  std::vector<int> fam_of(ni);              // no path compression inside the parallel loop
+  for (Eigen::Index t = 0; t < ni; ++t) family[fam_of[t] = find(t)].push_back(t);
+  for (Eigen::Index c = 0; c < np; ++c) out[c].fam_n = family.at(fam_of[sub[std::get<0>(pairs[c])]]).size();
+  // PCP: each member's IAF from everyone outside its family (rows of Wall,
+  // zero on the family), f_K the frequency outside the family; stored per
+  // member as float (as Gsub, an individual's sites contiguous)
+  Mat2D Wall, Ind;
+  Mat1D rs, h, Obs, Exp;
+  std::vector<int> fam_idx(ni), fam_size;
+  std::vector<float> PIsub;
+  if (pcp && ni > 0) {
+    Wall = Mat2D::Zero(ni, N);
+    Ind = Mat2D::Zero(family.size(), N);
+    for (const auto& [r, mem] : family) {
+      const Eigen::Index nf = mem.size(), fi = fam_size.size();
+      fam_size.push_back(nf);
+      std::vector<int> O(nf);
+      for (Eigen::Index l = 0; l < nf; ++l) {
+        O[l] = members[mem[l]];
+        fam_idx[mem[l]] = fi;
+        Ind(fi, O[l]) = 1.0;
+      }
+      Mat2D POO(nf, nf), WOO(nf, nf), PO(nf, N);
+      for (Eigen::Index a = 0; a < nf; ++a) {
+        PO.row(a) = pcp->P.row(O[a]);
+        for (Eigen::Index b = 0; b < nf; ++b) {
+          POO(a, b) = pcp->P(O[a], O[b]);
+          WOO(a, b) = pcp->W(O[a], O[b]);
+        }
+      }
+      const Mat2D corr = WOO * POO.ldlt().solve(PO);
+      for (Eigen::Index a = 0; a < nf; ++a) {
+        Wall.row(mem[a]) = pcp->W.row(O[a]) - corr.row(a);
+        for (int o : O) Wall(mem[a], o) = 0.0;
+      }
+    }
+    rs = Wall.rowwise().sum();
+    PIsub.resize(ni * M);
+  }
+  if (doF) {
+    h = pcp->W.diagonal();
+    Obs = Exp = Mat1D::Zero(N);
+  }
   Mat2D R(k1, M);  // V' g per site
   std::vector<int8_t> Gsub(ni * M);
   Mat2D AV = Mat2D::Zero(N, k1);
@@ -992,6 +1096,39 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
   // X: N x b on the 0..1 scale, g = 2X; the sums are rescaled after the pass
   auto add_block = [&](const GenoBlock& X) {
     const Eigen::Index b = X.cols();
+    if (pcp && (ni > 0 || doF)) {
+      const Eigen::RowVectorXd cs = X.colwise().sum();
+      if (ni > 0) {
+        const Mat2D Y = Wall * X, Fs = Ind * X;
+#pragma omp parallel for num_threads(params.threads)
+        for (Eigen::Index t = 0; t < ni; ++t) {
+          const int fi = fam_idx[t];
+          const double nk = (double)(N - fam_size[fi]);
+          float* dst = &PIsub[t * M + s0];
+          for (Eigen::Index j = 0; j < b; ++j) {
+            const double fk = (cs(j) - Fs(fi, j)) / nk;
+            dst[j] = (float)(fk + Y(t, j) - rs(t) * fk);
+          }
+        }
+      }
+      if (doF) {
+        const Eigen::RowVectorXd f = cs / (double)N;
+        const Mat2D Xc = X.rowwise() - f;
+        const Mat2D Y = pcp->W * Xc;
+#pragma omp parallel for num_threads(params.threads)
+        for (Eigen::Index i = 0; i < N; ++i) {
+          double o = 0, e = 0;
+          for (Eigen::Index j = 0; j < b; ++j) {
+            double p = f(j) + (Y(i, j) - h(i) * Xc(i, j)) / (1.0 - h(i));
+            p = std::min(std::max(p, 1e-4), 1.0 - 1e-4);
+            e += 2.0 * p * (1.0 - p);
+            o += X(i, j) == 0.5;
+          }
+          Obs(i) += o;
+          Exp(i) += e;
+        }
+      }
+    }
     add_GGtV(X, V, AV, params.threads);
     // per-sample sums, V' g per site, pair products and the members' genotypes
     // over small chunks of sites (transposed: an individual's sites contiguous)
@@ -1075,17 +1212,8 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
   }
   const double t_ea = tick.reltime();
   tick.clock();
-  // families: connected components of the related pairs (union-find on the
-  // member index); a family larger than max_family falls back to the pair
-  const Eigen::Index max_family = 100;
-  std::vector<int> root(ni);
-  std::iota(root.begin(), root.end(), 0);
-  std::function<int(int)> find = [&](int x) { return root[x] == x ? x : root[x] = find(root[x]); };
-  for (const auto& [i, j, phi] : pairs) root[find(sub[i])] = find(sub[j]);
-  std::map<int, std::vector<int>> family;  // root -> member indices (into members)
-  std::vector<int> fam_of(ni);              // no path compression inside the parallel loop
-  for (Eigen::Index t = 0; t < ni; ++t) family[fam_of[t] = find(t)].push_back(t);
-  // IBD sharing by EM (pcaone-ibd) with leave-the-family-out IAF
+  if (doF) write_inbred_sums(params, Obs, Exp, (uint64)M);
+  // IBD sharing (pcaone-ibd likelihood) with leave-the-family-out IAF
   const Mat2D VtV = V.transpose() * V;
 #pragma omp parallel num_threads(params.threads)
   {
@@ -1094,27 +1222,46 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
     for (Eigen::Index c = 0; c < np; ++c) {
       const int ia = std::get<0>(pairs[c]), ib = std::get<1>(pairs[c]);
       const int8_t *ga = &Gsub[sub[ia] * M], *gb = &Gsub[sub[ib] * M];
-      const Mat1D va = V.row(ia).transpose(), vb = V.row(ib).transpose();
-      std::vector<int> out_fit = family.at(fam_of[sub[ia]]);
-      if ((Eigen::Index)out_fit.size() > max_family) out_fit = {sub[ia], sub[ib]};
-      Mat2D A = VtV;
-      for (int t : out_fit) A.noalias() -= V.row(members[t]).transpose() * V.row(members[t]);
-      const Mat2D Ainv = A.completeOrthogonalDecomposition().pseudoInverse();
-      // pi_a = 0.5 va' Ainv (R_s - sum_l v_l g_ls) over the left-out members l
-      const Mat1D wa = Ainv * va, wb = Ainv * vb;
-      const Mat1D ra = R.transpose() * wa, rb = R.transpose() * wb;  // M
-      const Eigen::Index nf = out_fit.size();
-      std::vector<double> ca(nf), cb(nf);
-      std::vector<const int8_t*> gl(nf);
-      for (Eigen::Index l = 0; l < nf; ++l) {
-        ca[l] = wa.dot(V.row(members[out_fit[l]]));
-        cb[l] = wb.dot(V.row(members[out_fit[l]]));
-        gl[l] = &Gsub[out_fit[l] * M];
+      Mat1D ra, rb;
+      std::vector<double> ca, cb;
+      std::vector<const int8_t*> gl;
+      const float *qa = nullptr, *qb = nullptr;
+      if (pcp) {
+        qa = &PIsub[sub[ia] * M];
+        qb = &PIsub[sub[ib] * M];
+      } else {
+        const Mat1D va = V.row(ia).transpose(), vb = V.row(ib).transpose();
+        std::vector<int> out_fit = family.at(fam_of[sub[ia]]);
+        if ((Eigen::Index)out_fit.size() > max_family) out_fit = {sub[ia], sub[ib]};
+        Mat2D A = VtV;
+        for (int t : out_fit) A.noalias() -= V.row(members[t]).transpose() * V.row(members[t]);
+        const Mat2D Ainv = A.completeOrthogonalDecomposition().pseudoInverse();
+        // pi_a = 0.5 va' Ainv (R_s - sum_l v_l g_ls) over the left-out members l
+        const Mat1D wa = Ainv * va, wb = Ainv * vb;
+        ra = R.transpose() * wa;  // M
+        rb = R.transpose() * wb;
+        const Eigen::Index nf = out_fit.size();
+        ca.resize(nf);
+        cb.resize(nf);
+        gl.resize(nf);
+        for (Eigen::Index l = 0; l < nf; ++l) {
+          ca[l] = wa.dot(V.row(members[out_fit[l]]));
+          cb[l] = wb.dot(V.row(members[out_fit[l]]));
+          gl[l] = &Gsub[out_fit[l] * M];
+        }
       }
+      const Eigen::Index nf = gl.size();
       double ibs0 = 0, ibs0_exp = 0;
       for (Eigen::Index s = 0; s < M; ++s) {
         const int A1 = ga[s], B1 = gb[s];
-        double pa = 0.5 * ra(s), pb = 0.5 * rb(s);
+        double pa, pb;
+        if (pcp) {
+          pa = qa[s];
+          pb = qb[s];
+        } else {
+          pa = 0.5 * ra(s);
+          pb = 0.5 * rb(s);
+        }
         for (Eigen::Index l = 0; l < nf; ++l) {
           pa -= 0.5 * ca[l] * gl[l][s];
           pb -= 0.5 * cb[l] * gl[l][s];
@@ -1143,29 +1290,31 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
       out[c].kin = 0.25 * kk[1] + 0.5 * kk[2];
     }
   }
-  cao.print(tick.date(), "robust PCA: final kinship and IBD sharing (k0, k1, k2) of", np,
-            "related pairs from the final PCs: pass", t_pass, "s, evalAdmix", t_ea, "s, IBD", tick.reltime(), "s");
+  cao.print(tick.date(), "robust PCA: final kinship and IBD sharing (k0, k1, k2) of", np, "related pairs from",
+            pcp ? "the PCP allele frequencies" : "the final PCs", ": pass", t_pass, "s, evalAdmix", t_ea, "s, IBD", tick.reltime(), "s");
   return out;
 }
 
 static void write_outputs(Data* data, const Param& params, Eigen::Index N, const Mat2D& U, const Mat1D& w,
                           const std::vector<Pair>& pairs, const std::function<double(int, int)>& king_of,
-                          const std::vector<FinalRel>* fin_in = nullptr) {
+                          const std::vector<FinalRel>* fin_in = nullptr, const PcpIaf* pcp = nullptr) {
   write_matrix(params.fileout + ".eigvecs", U);
   write_matrix(params.fileout + ".eigvals", w);
-  const std::vector<FinalRel> fin = fin_in ? *fin_in : final_relatedness(data, params, U, pairs);
+  const std::vector<FinalRel> fin = fin_in ? *fin_in : final_relatedness(data, params, U, pairs, pcp);
   String1D ids = read_sample_ids(params);
   std::ofstream rp(params.fileout + ".relpairs");
   // KING: KING-robust; KIN_DETECT: kinship of the detection step (decides the
   // pair and its weight); KINSHIP, K0..K2: final estimates given the final PCs;
-  // KIN_EVALADMIX: the --evaladmix kinship of the pair
-  rp << "ID1\tID2\tKING\tKIN_DETECT\tKINSHIP\tK0\tK1\tK2\tKIN_EVALADMIX\n" << std::fixed << std::setprecision(6);
+  // KIN_EVALADMIX: the --evaladmix kinship of the pair; FAM_N: members of the
+  // pair's family (a family that is a large part of its population makes the
+  // IAF, and so KINSHIP and K0..K2, unreliable: KING is then the safer number)
+  rp << "ID1\tID2\tKING\tKIN_DETECT\tKINSHIP\tK0\tK1\tK2\tKIN_EVALADMIX\tFAM_N\n" << std::fixed << std::setprecision(6);
   for (size_t c = 0; c < pairs.size(); ++c) {
     const auto& [i, j, phi] = pairs[c];
     const std::string a = ids.size() == (size_t)N ? ids[i] : std::to_string(i);
     const std::string b = ids.size() == (size_t)N ? ids[j] : std::to_string(j);
     rp << a << "\t" << b << "\t" << king_of(i, j) << "\t" << phi << "\t" << fin[c].kin << "\t" << fin[c].k0 << "\t"
-       << fin[c].k1 << "\t" << fin[c].k2 << "\t" << fin[c].kin_ea << "\n";
+       << fin[c].k1 << "\t" << fin[c].k2 << "\t" << fin[c].kin_ea << "\t" << fin[c].fam_n << "\n";
   }
   cao.print(tick.date(), "robust PCA: PCs saved to", params.fileout + ".eigvecs", "and", pairs.size(),
             "related pairs to", params.fileout + ".relpairs");
@@ -2399,6 +2548,7 @@ static void run_dwg_gl(Data* data, const Param& params) {
   for (size_t c = 0; c < F.pairs.size(); ++c) {
     const auto& [i, j, phi] = F.pairs[c];
     std::vector<int> out = family.at(fam_of[i]);
+    fin[c].fam_n = out.size();
     if ((Eigen::Index)out.size() > 100) out = {i, j};
     Mat1D pa, pb;
     iaf_pair(U, i, j, out, pa, pb);
@@ -2416,6 +2566,8 @@ static void run_dwg_gl(Data* data, const Param& params) {
 }
 
 void run_robust(Data* data, const Param& params) {
+  if (params.inbreed == 2 && params.robust != "aarobust-kin")
+    cao.error("--inbreed 2 within a --robust run needs --robust aarobust-kin (this run uses " + params.robust + ")");
   if (params.file_t == FileType::BEAGLE) {
     if (params.robust != "dwg") cao.error("--robust with genotype likelihoods (-G) supports dwg only");
     return run_dwg_gl(data, params);
@@ -2495,6 +2647,8 @@ void run_robust(Data* data, const Param& params) {
   Mat1D w;
   Mat2D U;
   std::vector<Pair> pairs;
+  PcpIaf pcp_out;  // aarobust-kin, --robust-iaf pcp
+  bool use_pcp = false;
   if (mode == "detect-white" || mode == "frkin") {
     // fixed rank + kinship on the raw Gram with the diagonal free (the CS
     // matrix A/M - D differs only on the diagonal, which the fit does not use);
@@ -2647,6 +2801,10 @@ void run_robust(Data* data, const Param& params) {
           pairs.emplace_back(i, j, S(i, j) / (2.0 * std::sqrt(std::max(noise(i) * noise(j), 1e-24))));
     cao.print(tick.date(), "robust PCA: PCP with kinship threshold,", pairs.size(), "related pairs detected;",
               params.impute_diag ? "PCs of the fit (diagonal imputed)" : "PCs of the GRM without the related pairs");
+    if (params.robust_iaf == "pcp") {
+      pcp_out = pcp_iaf(C, S);
+      use_pcp = true;
+    }
   } else if (mode == "diag-impute") {
     // PCA of unrelated samples with the GRM diagonal imputed from the
     // off-diagonal entries (PCP with only the diagonal unobserved; no pairs).
@@ -2663,5 +2821,6 @@ void run_robust(Data* data, const Param& params) {
   }
 
   // ---- 4. output (diag-impute: --impute-diag without --robust) ---------------------------------------------------------
-  write_outputs(data, params, N, U, w, pairs, [&](int i, int j) { return king(i, j); });
+  write_outputs(data, params, N, U, w, pairs, [&](int i, int j) { return king(i, j); }, nullptr,
+                use_pcp ? &pcp_out : nullptr);
 }

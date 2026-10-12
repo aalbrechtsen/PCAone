@@ -178,6 +178,7 @@ Param::Param(int argc, char** argv) {
   opts.add<Value<double>, Attribute::advanced>("", "robust-tol", "--robust-engine operator: convergence tolerance (relative residual of the structure eigenpairs and change of the fit).", robust_tol, &robust_tol);
   opts.add<Value<int>, Attribute::advanced>("", "robust-small-max", "--robust auto --impute-diag: largest N that uses aarobust-kin.", robust_small_max, &robust_small_max);
   opts.add<Value<std::string>, Attribute::advanced>("", "robust-pcs", "--robust-engine operator, detect-white and cswhite: compute the final PCs of the whitened genotypes with the operator iteration (operator) or the window-based RSVD of --svd 2 (winsvd).", robust_pcs, &robust_pcs);
+  opts.add<Value<std::string>, Attribute::advanced>("", "robust-iaf", "--robust aarobust-kin: individual allele frequencies of the final kinship / IBD in .relpairs and of --inbreed 2. pcp: from the final PCP fit (no k; each related individual without its family, F leave-one-out); pcs: the regression on the top -k PCs (as before).", robust_iaf, &robust_iaf);
   opts.add<Switch, Attribute::advanced>("", "pcp-edge", "--robust aarobust-kin / --impute-diag: stop lowering the PCP threshold at the noise edge of the GRM, so the fit stays low rank.", &pcp_edge);
   opts.add<Switch, Attribute::advanced>("", "pcp-iram", "--robust aarobust-kin / --impute-diag: compute only the eigenpairs above the PCP threshold with IRAM instead of full eigendecompositions.", &pcp_iram);
   opts.add<Value<int>, Attribute::advanced>("", "robust-dense-max", "--robust-engine auto: largest N for the dense engine.", robust_dense_max, &robust_dense_max);
@@ -363,7 +364,7 @@ Param::Param(int argc, char** argv) {
             "--inbreed supports only --bfile, --pgen and --beagle input");
     // --inbreed pairs the target with the sites of the reference run, and no
     // reader filters them here, so --maf was silently ignored
-    require(inbreed == 0 || !maf_opt->is_set(),
+    require(inbreed == 0 || !robust.empty() || !maf_opt->is_set(),
             "--inbreed uses the sites of the reference run. apply --maf in that run instead");
     require(inbreed == 0 || !haploid,
             "--inbreed models the heterozygosity of diploid genotypes, so it cannot be used with --haploid");
@@ -424,7 +425,8 @@ Param::Param(int argc, char** argv) {
     }
 
     // handle inbreeding
-    if (inbreed > 0) {
+    // --inbreed 2 with --robust aarobust-kin: F from the PCP fit of the same run
+    if (inbreed > 0 && robust.empty()) {
       dopca = false, center = false;
       if (fileU.empty() || fileV.empty() || fileS.empty())
         throw std::invalid_argument("please use --USV together with --inbreed");
@@ -479,8 +481,14 @@ Param::Param(int argc, char** argv) {
         if (out_of_core) throw std::invalid_argument("--robust with genotype likelihoods (-G) runs in-core only");
         if (impute_diag) throw std::invalid_argument("--impute-diag does not support genotype likelihoods (-G)");
       }
-      if (emu || pcangsd || project > 0 || selection > 0 || inbreed > 0 || ld || evaladmix)
-        throw std::invalid_argument("--robust can not be combined with --emu, --pcangsd, --project, --selection, --inbreed, -D or --evaladmix");
+      if (emu || pcangsd || project > 0 || selection > 0 || inbreed == 1 || ld || evaladmix)
+        throw std::invalid_argument("--robust can not be combined with --emu, --pcangsd, --project, --selection, --inbreed 1, -D or --evaladmix");
+      if (inbreed == 2 && robust != "auto" && robust != "aarobust-kin")
+        throw std::invalid_argument("--inbreed 2 within a --robust run needs --robust aarobust-kin (F from its PCP fit)");
+      if (robust_iaf != "pcp" && robust_iaf != "pcs")
+        throw std::invalid_argument("--robust-iaf must be pcp or pcs");
+      if (inbreed == 2 && robust_iaf != "pcp")
+        throw std::invalid_argument("--inbreed 2 within a --robust run needs --robust-iaf pcp");
       if (robust_engine != "dense" && robust_engine != "operator" && robust_engine != "iram" && robust_engine != "auto")
         throw std::invalid_argument("--robust-engine must be dense, operator or auto");
       if (k < 1) throw std::invalid_argument("--robust needs -k >= 1");

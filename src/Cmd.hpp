@@ -119,6 +119,7 @@ class Param {
   int robust_dense_max = 5000;
   bool pcp_iram = false;
   bool pcp_edge = false;  // aarobust-kin: do not lower the PCP threshold below the GRM noise edge (L stays low rank)  // aarobust-kin: partial eigen-thresholding by IRAM (Spectra) instead of full eigendecompositions
+  std::string robust_iaf = "pcp";  // aarobust-kin: individual allele frequencies of the final relatedness and --inbreed 2 (pcp or pcs)
   std::string robust_pcs = "operator";  // operator engine, whitening modes: final PCs by the operator iteration or winSVD (--svd 2)
   // --evaladmix-kin: the pairs with kinship >= evaladmix_kin, in stripes within
   // -m, and an unrelated set at evaladmix_unrel (default evaladmix_kin)

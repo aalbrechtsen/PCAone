@@ -86,7 +86,7 @@ static int run(int argc, char* argv[]) {
   }
 
   // particular case for inbreeding samples
-  if (params.inbreed == 2) {
+  if (params.inbreed == 2 && params.robust.empty()) {
     data = new FileUSV(params);
     run_inbred_samples(data, params);
     delete data;
