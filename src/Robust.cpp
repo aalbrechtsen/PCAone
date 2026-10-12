@@ -2157,6 +2157,8 @@ static void run_dwg_operator(Data* data, const Param& params) {
     auto it = king_map.find({std::min(i, j), std::max(i, j)});
     return it == king_map.end() ? NAN : it->second;
   });
+  // the fitted per-individual noise (GRM scale): the whitening weight is 1 / sqrt(noise)
+  write_matrix(params.fileout + ".noise", F.v);
 }
 
 

@@ -302,7 +302,7 @@ def pca_intro(bfile, out, n=10, nsnp=150):
     ax0.set_ylabel("individuals", color=MUTED, labelpad=12)
     F.heat(ax1, C, "covariance between individuals (GRM)", pop=pop)
     scatter(ax2, U, pop, np.zeros(len(pop), bool), "PCs: top eigenvectors", a=0, b=1)
-    for a, b, t, pad in [(ax0, ax1, "standardize,\n$XX^\\top/M$", 0), (ax1, ax2, "eigen-\ndecomposition", 0.025)]:
+    for a, b, t, pad in [(ax0, ax1, "standardize,\n$GG^\\top/M$", 0), (ax1, ax2, "eigen-\ndecomposition", 0.025)]:
         F.arrow(fig, a, b, t)
         if pad:  # keep the arrow off the PC2 label
             p = fig.patches[-1] if fig.patches else fig.artists[-1]

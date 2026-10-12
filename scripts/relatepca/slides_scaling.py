@@ -5,7 +5,10 @@ all pairs at N = 10,000 and 20,000. Simulated data of the scaling test
 (data/scale/sim_N*, M = 20,000) and data/relfind/big_N100000; recall against
 plink2 KING >= tau (the *_king.kin0 files).
 
-usage: slides_scaling.py <times.tsv> <run dir> <out.pdf>
+With a 4th argument, the M = 500,000 runs (scale_big_sim.py data, <big dir>/times.tsv)
+are added as dashed lines: in RAM up to N = 20,000, out-of-core above (open symbols).
+
+usage: slides_scaling.py <times.tsv> <run dir> <out.pdf> [<big dir>]
   times.tsv: name, seconds, return code, pairs (scale_new.sh output)
 """
 import os
@@ -62,8 +65,29 @@ def main():
         print("\t".join(str(round(x, 4)) if isinstance(x, float) else str(x) for x in r))
     R = np.array(rows, dtype=float)
     fig, ax = plt.subplots(figsize=(7.2, 3.9))
-    ax.plot(R[:, 0], R[:, 1], "-o", color="#666666", lw=1.8, ms=5, label="standard PCAone")
-    ax.plot(R[:, 0], R[:, 2], "-o", color="#0072B2", lw=1.8, ms=5, label="dwg (default)")
+    big = len(sys.argv) > 4
+    m20 = ", $M$ = 20,000" if big else ""
+    ax.plot(R[:, 0], R[:, 1], "-o", color="#666666", lw=1.8, ms=5, label="standard PCAone" + m20)
+    ax.plot(R[:, 0], R[:, 2], "-o", color="#0072B2", lw=1.8, ms=5, label="dwg (default)" + m20)
+    if big:
+        B = {}
+        for l in open(os.path.join(sys.argv[4], "times.tsv")):
+            t = l.rstrip("\n").split("\t")
+            if len(t) == 4 and t[2] == "0":
+                B[t[0]] = float(t[1])
+        for key, col, lab in [("std", "#666666", "standard PCAone"), ("dwg", "#0072B2", "dwg (default)")]:
+            pts = []
+            for N in [1000, 2000, 5000, 20000, 100000, 500000]:
+                name = f"{key}_N{N}" + ("_ooc" if N > 20000 else "")
+                if name in B:
+                    pts.append((N, B[name], N > 20000))
+            if not pts:
+                continue
+            P = np.array([(n, t) for n, t, _ in pts])
+            ax.plot(P[:, 0], P[:, 1], "--", color=col, lw=1.8, label=lab + ", $M$ = 500,000")
+            for n, t, ooc in pts:
+                ax.plot(n, t, "s", color=col, ms=6, mfc="white" if ooc else col, mew=1.5)
+            print(key, "M=500k", [(n, round(t)) for n, t, _ in pts])
     ax.axvline(5000, color=MUTED, ls=":", lw=1)
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -72,7 +96,7 @@ def main():
     ax.set_ylabel("run time (s)", color=MUTED)
     for s in ["top", "right"]:
         ax.spines[s].set_visible(False)
-    ax.legend(frameon=False, fontsize=10, loc="lower right")
+    ax.legend(frameon=False, fontsize=9 if big else 10, loc="lower right")
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)

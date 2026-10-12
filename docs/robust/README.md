@@ -10,7 +10,7 @@ Close relatives (2nd degree and closer) distort PCA. Their shared genome adds co
 
 - **Large samples:** the top axes survive, but relatives are misplaced, and the PCs just beyond the ancestry axes become “family axes”.
 
-The `--robust` option of PCAone computes PCs in which close relatives keep their place in the sample but do not shape the axes. Every individual is analysed in-sample: nothing is projected.
+The `--robust` option of PCAone computes PCs in which close relatives keep their place in the sample but do not shape the axes. Every individual is analyzed in-sample: nothing is projected.
 
 Figure 1 shows both problems: a few relatives make standard PCA lose an ancestry axis, and with 5 individuals per population the same happens without any relatives (Section 3).
 
@@ -20,13 +20,13 @@ Figure 1 shows both problems: a few relatives make standard PCA lose an ancestry
 
 **Figure 1.** The problem. Left: the populations (MXL is admixed, European and Native American). Middle: the reference truth (PC2 vs PC3). Right: standard PCA mapped onto the truth by least squares on the unrelated individuals. Top: 10 unrelated individuals per population plus 8 relatives (stars); PC3 is lost ($R^2=0.01$). Bottom: 5 individuals per population, no relatives; PC3 is lost as well ($R^2=0.02$). admixTjeck2 genotypes, 54k SNPs; made by `scripts/relatepca/slides_hook.py`.
 
-| mode | idea | assumes | role |
-|:---|:---|:---|:---|
-| `aarobust-kin` | robust PCA (PCP) of the GRM, kinship threshold | nothing on HWE; no $K$ | with `--impute-diag`, $N\le1000$ |
-| `detect-white` | detect pairs on the CS matrix, then whitening | rank from the data, $\le k+1$ | alternative (CS scale) |
-| `cswhite` | Chen & Storey whitening with KING kinship | HWE within individuals | alternative |
-| `frkin` | fixed rank + kinship threshold on the CS matrix | rank $k+1$ | alternative |
-| `dwg` | `detect-white` on the GRM scale, admixture-aware screen | no HWE; $k$ only an upper bound | **default** |
+| mode           | idea                                                         | assumes                         | role                             |
+|:---------------|:-------------------------------------------------------------|:--------------------------------|:---------------------------------|
+| `aarobust-kin` | robust PCA (PCP) of the GRM, kinship threshold               | nothing on HWE; no $K$          | with `--impute-diag`, $N\le1000$ |
+| `detect-white` | detect pairs on the raw Gram (diagonal free), then whitening | rank from the data, $\le k+1$   | alternative (raw scale)          |
+| `cswhite`      | Chen & Storey whitening with KING kinship                    | HWE within individuals          | alternative                      |
+| `frkin`        | fixed rank + kinship threshold on the raw Gram               | rank $k+1$                      | alternative                      |
+| `dwg`          | `detect-white` on the GRM scale, admixture-aware screen      | no HWE; $k$ only an upper bound | **default**                      |
 
 **Table 1.** The modes. `--robust` alone means `auto`: `dwg` at every $N$ (operator engine in-core; dense engine out-of-core up to $N=5000$). With `--impute-diag`, `auto` uses `aarobust-kin` ($N\le1000$, `--robust-small-max`). The switch `--impute-diag` imputes the GRM diagonal; it works with standard PCA and with `aarobust-kin` (Section 5.6). The diagonal is always free in `dwg` and `detect-white`.
 
@@ -56,9 +56,9 @@ To call a PCA right or wrong we need the PCs that the sample *should* have. A PC
 
 1.  **Reference panel.** Everyone in admixTjeck2 who is not in the sample: not among its unrelated individuals and not used as a parent or donor for its relatives. That is 326 of the 374 individuals in the example, about 80 per population.
 
-2.  **PCA of the panel.** The genotypes are standardised with the panel’s allele frequencies, and the top $K-1$ axes are kept. With about 80 per population these axes are stable.
+2.  **PCA of the panel.** The genotypes are standardized with the panel’s allele frequencies, and the top $K-1$ axes are kept. With about 80 per population these axes are stable.
 
-3.  **Projection.** Every sample individual is projected onto these axes with the panel’s frequencies and loadings. Relatives are projected with their realised genotypes, so their true position is where their ancestry puts them. Each axis is scaled to unit length so the axes count equally.
+3.  **Projection.** Every sample individual is projected onto these axes with the panel’s frequencies and loadings. Relatives are projected with their realized genotypes, so their true position is where their ancestry puts them. Each axis is scaled to unit length so the axes count equally.
 
 A method’s PCs are compared with this truth by regressing each true axis on the method’s $K-1$ PCs over the unrelated individuals, so rotation, sign and scale are free.
 
@@ -80,11 +80,11 @@ The right strategy depends on $N$. What limits each regime is different:
 
 `--robust` (`auto`) picks the regime from $N$ (Table 2). Figures 3–5 show the pipeline of each. All three end with the same step: the final relatedness of the detected pairs, estimated from the final PCs (Section 6).
 
-| regime | $N$ | mode | finding the relatives | engine |
-|:---|:---|:---|:---|:---|
-| small and large | $\le20{,}000$ | `dwg` | KING over all pairs, then evalAdmix + $k_0$ | operator (dense out-of-core, $N\le5000$) |
-|  | $\le1000$ | `aarobust-kin` with `--impute-diag` | KING over all pairs (dense) | dense |
-| very large | $>20{,}000$ | `dwg` | count sketch + nearest neighbours, KING on the candidates; residual-sketch evalAdmix + $k_0$ | operator |
+| regime          | $N$           | mode                                | finding the relatives                                                                       | engine                                   |
+|:----------------|:--------------|:------------------------------------|:--------------------------------------------------------------------------------------------|:-----------------------------------------|
+| small and large | $\le20{,}000$ | `dwg`                               | KING over all pairs, then evalAdmix + $k_0$                                                 | operator (dense out-of-core, $N\le5000$) |
+|                 | $\le1000$     | `aarobust-kin` with `--impute-diag` | KING over all pairs (dense)                                                                 | dense                                    |
+| very large      | $>20{,}000$   | `dwg`                               | count sketch + nearest neighbors, KING on the candidates; residual-sketch evalAdmix + $k_0$ | operator                                 |
 
 **Table 2.** The regimes and their defaults. The limits are options: `--robust-dense-max` (5000), `--robust-small-max` (1000, `--impute-diag` only) and `--king-sketch-min` (20,000). `--kinship` replaces the search for the relatives in every regime.
 
@@ -106,11 +106,11 @@ The right strategy depends on $N$. What limits each regime is different:
 
 ![image](methods/regime_verylarge.png)
 
-**Figure 5.** **Very large $N$.** The search for relatives replaces KING over all pairs. A count sketch of the standardised genotypes is built in the first pass. In it, relatives have a correlation of about $2\phi$ and unrelated pairs about $0\pm1/\sqrt{s}$: the histogram shows all 6052 true pairs of the simulated $N=20{,}000$ data against 200,000 random pairs. Each person’s 5 nearest neighbours are checked with exact KING. This finds every MZ, 1st- and 2nd-degree pair, at a third of the time of KING over all pairs at $N=100{,}000$. The rest of the pipeline is that of large $N$ (`dwg`).
+**Figure 5.** **Very large $N$.** The search for relatives replaces KING over all pairs. A count sketch of the standardized genotypes is built in the first pass. In it, relatives have a correlation of about $2\phi$ and unrelated pairs about $0\pm1/\sqrt{s}$: the histogram shows all 6052 true pairs of the simulated $N=20{,}000$ data against 200,000 random pairs. Each person’s 5 nearest neighbors are checked with exact KING. This finds every MZ, 1st- and 2nd-degree pair, at a third of the time of KING over all pairs at $N=100{,}000$. The rest of the pipeline is that of large $N$ (`dwg`).
 
 ##### Very large $N$
 
-($N>20{,}000$; `dwg` with the sketch search). KING over all pairs costs $N^2M/64$ popcounts. At $N=100{,}000$ it takes longer than the whole PCA. It is replaced by a nearest-neighbour search in a sketch (Section 8.1), which finds exactly the same related pairs. Its cost is $N^2s$ with $s=2048$, independent of the number of SNPs. The same sketch, with the structure axes projected out, gives the candidates of the evalAdmix screen (Section 5.3). At $N=100{,}000$, `dwg` takes 226 s in-core (`detect-white` 118 s, standard PCAone 148 s): the residual-sketch neighbour search of the screen costs about 50 s, plus one refit when first cousins pass the screen.
+($N>20{,}000$; `dwg` with the sketch search). KING over all pairs costs $N^2M/64$ popcounts. At $N=100{,}000$ it takes longer than the whole PCA. It is replaced by a nearest-neighbor search in a sketch (Section 8.1), which finds exactly the same related pairs. Its cost is $N^2s$ with $s=2048$, independent of the number of SNPs. The same sketch, with the structure axes projected out, gives the candidates of the evalAdmix screen (Section 5.3). At $N=100{,}000$, `dwg` takes 226 s in-core (`detect-white` 118 s, standard PCAone 148 s): the residual-sketch neighbor search of the screen costs about 50 s, plus one refit when first cousins pass the screen.
 
 ## 3 The small-$N$ problem: the diagonal and the relatives
 
@@ -152,7 +152,7 @@ The same holds across the benchmark (Table 7).
 
 - $D_i=\frac1M\sum_s g_{is}(2-g_{is})$: the heterozygosity of individual $i$.
 
-- $f_s$: the sample allele frequency of SNP $s$; $X$: the standardised genotypes, $(g_{is}-2f_s)/\sqrt{2f_s(1-f_s)}$.
+- $f_s$: the sample allele frequency of SNP $s$; $X$: the standardized genotypes, $(g_{is}-2f_s)/\sqrt{2f_s(1-f_s)}$.
 
 - $C=XX'/M$: the GRM.
 
@@ -169,15 +169,17 @@ where $\Pi$ holds the individual allele frequencies. $H$ is low rank *including 
 
 The GRM has no such correction. Its diagonal reflects heterozygosity, not structure, and at very small sample sizes this alone can create a spurious axis. For the GRM, the methods therefore treat the diagonal as *unobserved*.
 
+With the diagonal unobserved, $H$ and the raw Gram $A/M$ are the same matrix: they differ only on the diagonal. `detect-white` and `frkin` therefore fit $A/M$ directly; $H$ is needed only by `cswhite`, which trusts the HWE-based diagonal. $D$ is still used by `detect-white` and `frkin` to scale residuals to kinship.
+
 ##### Structure-adjusted kinship.
 
-For a residual $R=H-L$ after removing a structure fit $L$, the kinship of pair $(i,j)$ is estimated as
+For an off-diagonal residual $R=A/M-L$ (the same as $H-L$ off the diagonal) after removing a structure fit $L$, the kinship of pair $(i,j)$ is estimated as
 
 $$
 \hat\phi_{ij} = \frac{R_{ij}}{2\sqrt{v_iv_j}},
 $$
 
-where $v_i$ is the noise variance of individual $i$: $D_i$ on the CS scale, or the residual diagonal for the GRM. A pair is *related* when $\hat\phi_{ij}>\tau$ and the pair passes the KING screen.
+where $v_i$ is the noise variance of individual $i$: $D_i$ for the raw Gram (`detect-white`, `frkin`), or the residual diagonal for the GRM (`dwg`). A pair is *related* when $\hat\phi_{ij}>\tau$ and the pair passes the KING screen.
 
 ##### KING-robust.
 
@@ -212,7 +214,7 @@ Noise eigenvalues of an $N\times N$ matrix of such entries end near $2\sigma\sqr
 
 ![image](methods/ga_aarobust.png)
 
-**Figure .** Graphical abstract of `aarobust-kin` on the example. Individuals are ordered by population; each relative is placed right after its closest kin. The GRM’s diagonal (grey) is treated as unobserved. PCP splits the GRM into $L$, the completed structure, and $S$, which holds the six related pairs and the diagonal. The PCs shown are those of $L$, as given with `--impute-diag`. Without it, they are the PCs of the GRM with the related entries replaced by $L$ and the observed diagonal kept.
+**Figure .** Graphical abstract of `aarobust-kin` on the example. Individuals are ordered by population; each relative is placed right after its closest kin. The GRM’s diagonal (gray) is treated as unobserved. PCP splits the GRM into $L$, the completed structure, and $S$, which holds the six related pairs and the diagonal. The PCs shown are those of $L$, as given with `--impute-diag`. Without it, they are the PCs of the GRM with the related entries replaced by $L$ and the observed diagonal kept.
 
 ##### Idea.
 
@@ -259,13 +261,13 @@ There is no $\lambda$ and no rank.
 
 ![image](methods/ga_detect_white.png)
 
-**Figure .** Graphical abstract of `detect-white`. The CS matrix and $L$ are double-centred for display only (the mean component would otherwise dominate). The noise edge chose rank 4 (three ancestry axes plus the mean). $S$ holds the detected pairs. $\Sigma$ is block diagonal: one block per family, a scalar for everyone else.
+**Figure .** Graphical abstract of `detect-white`. The raw Gram and $L$ are double-centered for display only (the mean component would otherwise dominate). The noise edge chose rank 4 (three ancestry axes plus the mean). $S$ holds the detected pairs. $\Sigma$ is block diagonal: one block per family, a scalar for everyone else.
 
 ##### Idea.
 
 Two steps.
 
-1.  *Detection.* A low-rank fit of the CS matrix, with the related pairs removed through the kinship rule, gives the related pairs, their kinship and each individual’s noise variance.
+1.  *Detection.* A low-rank fit of the raw Gram matrix with the diagonal free, with the related pairs removed through the kinship rule, gives the related pairs, their kinship and each individual’s noise variance.
 
 2.  *Whitening.* The raw Gram matrix is whitened with the covariance implied by the families. The relatives then count as the “effective number” of independent individuals they represent.
 
@@ -273,17 +275,17 @@ Two steps.
 
 1.  *Detection fit* (AltProj style; the rank is raised one step at a time, starting at $r=1$). At rank $r$, alternate until $L$ stops changing:
 
-    - $L$ = the rank-$r$ eigen-fit of $H-S$;
+    - $L$ = the rank-$r$ eigen-fit of $A/M-S$;
 
-    - $R=H-L$;
+    - $R=A/M-L$;
 
     - $S_{ij}=R_{ij}$ for screened pairs with $R_{ij}/(2\sqrt{D_iD_j})>\tau$;
 
     - $S_{ii}=R_{ii}$ (the diagonal is free).
 
-2.  *Rank.* Move to $r+1$ while the next eigenvalue of $H-S$ lies above the noise edge and $r<k+1$. With `--robust-fixed-rank` the rank is always $k+1$.
+2.  *Rank.* Move to $r+1$ while the next eigenvalue of $A/M-S$ lies above the noise edge and $r<k+1$. With `--robust-fixed-rank` the rank is always $k+1$.
 
-3.  *Pairs:* $\hat\phi_{ij}=(H-L)_{ij}/(2\sqrt{D_iD_j})$ for the pairs in $S$.
+3.  *Pairs:* $\hat\phi_{ij}=(A/M-L)_{ij}/(2\sqrt{D_iD_j})$ for the pairs in $S$.
 
 4.  *Noise:* $v_i=A_{ii}/M-L_{ii}$, the observed diagonal minus its structure part.
 
@@ -307,20 +309,20 @@ Two steps.
 
 ### 5.3 `dwg`: `detect-white` on the GRM scale
 
-`detect-white` works on the CS matrix, and uses heterozygosity $D$ to scale kinship. This subsection describes a version that works on the GRM scale and uses no heterozygosity at all, `dwg` (`--robust` `dwg`), the default of `--robust`. It is implemented in both engines. The dense engine reproduces the Python prototype (`scripts/relatepca/dwg_loc.py`) exactly: identical related pairs and $|\cos|=1.000000$ for the top PCs in 216 runs (8 scenarios, $n=5$–20, $k=3$ and 10, in-core and out-of-core). The operator engine gives the same related pairs as the dense engine in all 108 runs and at $N=2000$ and 5000 ($|\cos|\ge0.99999$; the two exceptions are a degenerate first-cousin case at $n=5$, $k=10$, where every method fails). Without $N\times N$ matrices it needs: exact GRM-scale entries of the candidate pairs from one weighted pass (popcounts cannot weight SNPs); the kinship among an axis’s top individuals from one product with their unit vectors; and, for the evalAdmix screen, the nearest neighbours in the count sketch with the structure axes projected out (pairs with residual correlation $>0.12$), checked with the exact evalAdmix kinship and $k_0$.
+`detect-white` works on the raw Gram matrix, and uses heterozygosity $D$ to scale kinship. This subsection describes a version that works on the GRM scale and uses no heterozygosity at all, `dwg` (`--robust` `dwg`), the default of `--robust`. It is implemented in both engines. The dense engine reproduces the Python prototype (`scripts/relatepca/dwg_loc.py`) exactly: identical related pairs and $|\cos|=1.000000$ for the top PCs in 216 runs (8 scenarios, $n=5$–20, $k=3$ and 10, in-core and out-of-core). The operator engine gives the same related pairs as the dense engine in all 108 runs and at $N=2000$ and 5000 ($|\cos|\ge0.99999$; the two exceptions are a degenerate first-cousin case at $n=5$, $k=10$, where every method fails). Without $N\times N$ matrices it needs: exact GRM-scale entries of the candidate pairs from one weighted pass (popcounts cannot weight SNPs); the kinship among an axis’s top individuals from one product with their unit vectors; and, for the evalAdmix screen, the nearest neighbors in the count sketch with the structure axes projected out (pairs with residual correlation $>0.12$), checked with the exact evalAdmix kinship and $k_0$.
 
 ![image](methods/ga_dwg.png)
 
-**Figure 10.** Graphical abstract of `dwg` on the example, as implemented. *Top:* the genotypes give the SNP-standardised but uncentred GRM $A$ (centring would spread each person’s heterozygosity over the whole matrix). The fit $A=L+S$ chooses rank 4 (three ancestry axes plus the mean) by the noise edge; $S$ holds the diagonal and the six related pairs, with kinship scaled by the fitted noise $v$; $L=A-S$ has its diagonal and pair entries imputed by the top 3 PCs. *Bottom:* $\Sigma$ (noise plus families) whitens $A$; the whitened matrix is not centred (all positive), so $\Sigma^{-1/2}\mathbf 1$, the mean direction in the whitened space, is projected out; the top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$, are the PCs, with PC1 the first ancestry axis. Candidates come from KING and, for relatives KING misses, from an evalAdmix screen confirmed by $k_0$ (not shown). $A$, $L$ and the centred matrix are double-centred for display only.
+**Figure 10.** Graphical abstract of `dwg` on the example, as implemented. *Top:* the genotypes give the SNP-standardized but uncentered GRM $A$ (centering would spread each person’s heterozygosity over the whole matrix). The fit $A=L+S$ chooses rank 4 (three ancestry axes plus the mean) by the noise edge; $S$ holds the diagonal and the six related pairs, with kinship scaled by the fitted noise $v$; $L=A-S$ has its diagonal and pair entries imputed by the top 3 PCs. *Bottom:* $\Sigma$ (noise plus families) whitens $A$; the whitened matrix is not centered (all positive), so $\Sigma^{-1/2}\mathbf 1$, the mean direction in the whitened space, is projected out; the top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$, are the PCs, with PC1 the first ancestry axis. Candidates come from KING and, for relatives KING misses, from an evalAdmix screen confirmed by $k_0$ (not shown). $A$, $L$ and the centered matrix are double-centered for display only.
 
-##### Final PCs: centred after whitening.
+##### Final PCs: centered after whitening.
 
-The whitened matrix $\Sigma^{-1/2}A\Sigma^{-1/2}$ is built from uncentred genotypes, so its top eigenvector is the mean. Instead of dropping that eigenvector, `dwg` centres the whitened matrix by projecting out $u=\Sigma^{-1/2}\mathbf 1/
-\|\Sigma^{-1/2}\mathbf 1\|$: the PCs are the top $k$ eigenvectors of $(I-uu')\,\Sigma^{-1/2}A\Sigma^{-1/2}(I-uu')$, mapped back by $\Sigma^{1/2}$. Without relatives this is the same as centring every SNP by its mean weighted by $1/v_i$. The whitened noise $I$ becomes $I-uu'$, which is still flat, so no heterozygosity enters. Centring with the plain mean instead would leave a mean remnant along $\Sigma^{-1/2}\mathbf 1-\bar u\mathbf 1$, which follows each person’s noise, and failed in one of six runs with relatives. Only the final step is centred: the detection fit stays uncentred (Section 3, the centring trap). On 12 small-$N$ datasets with and without relatives the centred PCs gave the same accuracy as dropping the mean eigenvector.
+The whitened matrix $\Sigma^{-1/2}A\Sigma^{-1/2}$ is built from uncentered genotypes, so its top eigenvector is the mean. Instead of dropping that eigenvector, `dwg` centers the whitened matrix by projecting out $u=\Sigma^{-1/2}\mathbf 1/
+\|\Sigma^{-1/2}\mathbf 1\|$: the PCs are the top $k$ eigenvectors of $(I-uu')\,\Sigma^{-1/2}A\Sigma^{-1/2}(I-uu')$, mapped back by $\Sigma^{1/2}$. Without relatives this is the same as centering every SNP by its mean weighted by $1/v_i$. The whitened noise $I$ becomes $I-uu'$, which is still flat, so no heterozygosity enters. Centering with the plain mean instead would leave a mean remnant along $\Sigma^{-1/2}\mathbf 1-\bar u\mathbf 1$, which follows each person’s noise, and failed in one of six runs with relatives. Only the final step is centered: the detection fit stays uncentered (Section 3, the centering trap). On 12 small-$N$ datasets with and without relatives the centered PCs gave the same accuracy as dropping the mean eigenvector.
 
-##### Why the plain GRM fails: centring.
+##### Why the plain GRM fails: centering.
 
-A fixed-rank fit of the standardised GRM with the related pairs and the diagonal imputed (the original AArobust idea, with IRAM-friendly partial eigensolves) failed in 82% of runs at $n=5$ per population, even without relatives (Table 3). The cause is centring, not scaling. With $X_c=JG$ and $J=I-\mathbf{1}\mathbf{1}'/N$, the centred Gram is $C=JAJ$, and a diagonal noise term $D$ becomes
+A fixed-rank fit of the standardized GRM with the related pairs and the diagonal imputed (the original AArobust idea, with IRAM-friendly partial eigensolves) failed in 82% of runs at $n=5$ per population, even without relatives (Table 3). The cause is centering, not scaling. With $X_c=JG$ and $J=I-\mathbf{1}\mathbf{1}'/N$, the centered Gram is $C=JAJ$, and a diagonal noise term $D$ becomes
 
 $$
 JDJ \;=\; D-\frac{d\mathbf 1'+\mathbf 1d'}{N}+\frac{\bar d}{N}\mathbf 1\mathbf 1' ,
@@ -328,7 +330,7 @@ $$
 
 so every off-diagonal entry $C_{ij}$ picks up $-(d_i+d_j)/N$. Each individual’s heterozygosity is spread over all its off-diagonal entries. In $C$ every row sums to zero, so the diagonal is determined by the off-diagonal entries ($C_{ii}=-\sum_{j\ne i}C_{ij}$): freeing the diagonal frees nothing. Heterozygosity differs by population, so the leaked rank-2 pattern lines up with the ancestry axes, and at small $N$ a fixed-rank fit takes part of it for structure. PCP survives on $C$ only because its $L$ ends up full rank.
 
-##### Undoing the centring.
+##### Undoing the centering.
 
 With $\mu=2f$ (scaled like the SNPs), $G=X_c+\mathbf 1\mu'$ and
 
@@ -337,54 +339,26 @@ A \;=\; GG'/M \;=\; C+u\mathbf 1'+\mathbf 1u'+(\mu'\mu/M)\,\mathbf 1\mathbf 1',
   \qquad u=X_c\mu/M .
 $$
 
-Restoring the uncentred Gram needs $f$ and the cross term $u$, one number per individual; $C$ alone is not enough, because centring discards each individual’s component along $\mathbf 1$. The restoration is exact ($10^{-14}$). SNP scaling makes no difference: the scaled but uncentred Gram behaves exactly like the CS matrix (Table 3).
+Restoring the uncentered Gram needs $f$ and the cross term $u$, one number per individual; $C$ alone is not enough, because centering discards each individual’s component along $\mathbf 1$. The restoration is exact ($10^{-14}$). SNP scaling makes no difference: the scaled but uncentered Gram behaves exactly like the raw Gram (Table 3).
 
-<table>
-<thead>
-<tr>
-<th style="text-align: left;">fixed rank + kinship rule, diagonal free, on</th>
-<th colspan="3" style="text-align: center;">failures at <span class="math inline"><em>n</em> = 5</span> / 10 / 20</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="text-align: left;">GRM, scaled and <strong>centred</strong> (rank <span class="math inline"><em>k</em></span>)</td>
-<td style="text-align: center;">82%</td>
-<td style="text-align: center;">18%</td>
-<td style="text-align: center;">0%</td>
-</tr>
-<tr>
-<td style="text-align: left;">GRM, scaled, <strong>not centred</strong> (rank <span class="math inline"><em>k</em> + 1</span>, mean dropped)</td>
-<td style="text-align: center;">0%</td>
-<td style="text-align: center;">0%</td>
-<td style="text-align: center;">0%</td>
-</tr>
-<tr>
-<td style="text-align: left;">CS matrix (raw, not centred; <code>frkin</code>)</td>
-<td style="text-align: center;">0%</td>
-<td style="text-align: center;">0%</td>
-<td style="text-align: center;">0%</td>
-</tr>
-<tr>
-<td style="text-align: left;">PCP on the centred GRM (<code>aarobust-kin</code>)</td>
-<td style="text-align: center;">2.5%</td>
-<td style="text-align: center;">0%</td>
-<td style="text-align: center;">0%</td>
-</tr>
-</tbody>
-</table>
+| fixed rank + kinship rule, diagonal free, on             | failures at $n=5$ / 10 / 20 |     |     |
+|:---------------------------------------------------------|:---------------------------:|:---:|:---:|
+| GRM, scaled and **centered** (rank $k$)                  |             82%             | 18% | 0%  |
+| GRM, scaled, **not centered** (rank $k+1$, mean dropped) |             0%              | 0%  | 0%  |
+| raw Gram (not centered, not scaled; `frkin`)             |             0%              | 0%  | 0%  |
+| PCP on the centered GRM (`aarobust-kin`)                 |            2.5%             | 0%  | 0%  |
 
-**Table 3.** Centring, not scaling, breaks the fixed-rank fit at small $N$ (8 scenarios $\times$ 5 replicates per $n$, $k=3$, reference truth).
+**Table 3.** Centering, not scaling, breaks the fixed-rank fit at small $N$ (8 scenarios $\times$ 5 replicates per $n$, $k=3$, reference truth).
 
 ##### The method.
 
-1.  *Matrix.* The uncentred, SNP-standardised Gram $A_s=GW^{-1}G'/M$ with $W=\mathrm{diag}(2f(1-f))$, built directly from the uncentred genotypes (out of core PCAone’s reader returns centred genotypes and $f$ is added back, i.e. the restoration above). No heterozygosity is subtracted.
+1.  *Matrix.* The uncentered, SNP-standardized Gram $A_s=GW^{-1}G'/M$ with $W=\mathrm{diag}(2f(1-f))$, built directly from the uncentered genotypes (out of core PCAone’s reader returns centered genotypes and $f$ is added back, i.e. the restoration above). No heterozygosity is subtracted.
 
 2.  *Detection*, as in `detect-white`: rank raised from 1; at each rank, alternate $L=$ rank-$r$ eigen-fit of $A_s-S$, $R=A_s-L$, $S_{ij}=R_{ij}$ for candidate pairs (KING, then the screen below) with $\hat\phi_{ij}=R_{ij}/(2\sqrt{v_iv_j})>\tau$, and $S_{ii}=R_{ii}$ (free diagonal). The kinship is scaled by the *fitted* noise $v_i=A_{s,ii}-L_{ii}$, as in `aarobust-kin`, not by heterozygosity.
 
-3.  *Rank* from the noise edge on the GRM scale, $2\sigma\sqrt N$ with $\sigma^2=\sum_s\big(E[g^2]^2-(2f_s)^4\big)/(2f_s(1-f_s))^2/M^2$, at most $k+1$ (the extra one is the mean component); localised family axes do not count (see the candidate screen).
+3.  *Rank* from the noise edge on the GRM scale, $2\sigma\sqrt N$ with $\sigma^2=\sum_s\big(E[g^2]^2-(2f_s)^4\big)/(2f_s(1-f_s))^2/M^2$, at most $k+1$ (the extra one is the mean component); localized family axes do not count (see the candidate screen).
 
-4.  *Whitening and centring*: $\Sigma=v^{1/2}(I+2\Psi)v^{1/2}$; the whitened matrix $\Sigma^{-1/2}A_s\Sigma^{-1/2}$ is centred by projecting out $\Sigma^{-1/2}\mathbf 1$, and the PCs are its top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$ (see *Final PCs* above).
+4.  *Whitening and centering*: $\Sigma=v^{1/2}(I+2\Psi)v^{1/2}$; the whitened matrix $\Sigma^{-1/2}A_s\Sigma^{-1/2}$ is centered by projecting out $\Sigma^{-1/2}\mathbf 1$, and the PCs are its top $k$ eigenvectors, mapped back by $\Sigma^{1/2}$ (see *Final PCs* above).
 
 ##### Why whitening, not the PCs of $L$ or of the imputed GRM.
 
@@ -392,15 +366,15 @@ Restoring the uncentred Gram needs $f$ and the cross term $u$, one number per in
 
 - The GRM with the related-pair entries and the diagonal imputed from $L$ has full rank and is as accurate on the top PCs. But imputation leaves each relative counted as a full individual (siblings keep near-identical correlations with everyone else). Beyond the ancestry axes, family influence stayed about twice as large as with whitening (median $\eta^2$ 0.37 against 0.21 at $N=2000$, 30% in families). The diagonal must be imputed: keeping the observed one fails in 100% of runs at $n=5$, and the CS-corrected one in 12.5%.
 
-|  |  |  |  |  |
-|:---|:--:|:--:|:--:|:--:|
-|  | failures, $k=3$ | failures, $k=10$ | relatives’ error | family axes / median $\eta^2$ |
-|  | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) | ($k=3$ / 10) | ($N=2000$, 30% / 10%) |
-| `aarobust-kin` | 2.5% / 0 / 0 / 0 | 2.5% / 0 / 0 / 0 | 0.06 / 0.06 | – |
-| `detect-white` (CS) | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0.05 / 0.11 | 0 / 0.21; 0 / 0.07 |
-| `dwg`, kinship scaled by $D$ | 0 / 0 / 0 / 0 | 2.5% / 0 / 0 / 0 | 0.06 / 0.11 | 0 / 0.21; 0 / 0.07 |
-| **`dwg`, kinship scaled by $v$** | 0 / 0 / 0 / 0 | 2.5% / 0 / 0 / 0 | 0.06 / 0.11 | 0 / 0.21; 0 / 0.07 |
-| standard PCA | 100% / 78% / 60% / 0 | same | 0.67 | 16 / 0.92; 16 / 0.86 |
+|                                  |                        |                        |                  |                               |
+|:---------------------------------|:----------------------:|:----------------------:|:----------------:|:-----------------------------:|
+|                                  |    failures, $k=3$     |    failures, $k=10$    | relatives’ error | family axes / median $\eta^2$ |
+|                                  | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) |   ($k=3$ / 10)   |     ($N=2000$, 30% / 10%)     |
+| `aarobust-kin`                   |    2.5% / 0 / 0 / 0    |    2.5% / 0 / 0 / 0    |   0.06 / 0.06    |               –               |
+| `detect-white` (CS)              |     0 / 0 / 0 / 0      |     0 / 0 / 0 / 0      |   0.05 / 0.11    |      0 / 0.21; 0 / 0.07       |
+| `dwg`, kinship scaled by $D$     |     0 / 0 / 0 / 0      |    2.5% / 0 / 0 / 0    |   0.06 / 0.11    |      0 / 0.21; 0 / 0.07       |
+| **`dwg`, kinship scaled by $v$** |     0 / 0 / 0 / 0      |    2.5% / 0 / 0 / 0    |   0.06 / 0.11    |      0 / 0.21; 0 / 0.07       |
+| standard PCA                     |  100% / 78% / 60% / 0  |          same          |       0.67       |     16 / 0.92; 16 / 0.86      |
 
 **Table 4.** `dwg` against the current methods. Small $N$: 8 scenarios (including an inbred population and genotype errors) $\times$ 5 replicates per $n$, reference truth; mean min $R^2$ was 0.991–0.993 at $n=5$ and 0.997–0.999 above for all four robust methods. Large $N$: the 16 PCs beyond the 4 ancestry axes at $k=20$. The one failure of `dwg` at $k=10$ (first cousins, $n=5$) is a borderline case shared by all three noise-edge methods: the cousins push one extra eigenvalue above the edge (rank 5), and `detect-white` lands at min $R^2=0.953$, just above the line.
 
@@ -414,22 +388,22 @@ KING-robust misses relatives of different ancestry (Table 5). Such a pair can ne
 
 3.  *IBD confirmation.* evalAdmix itself flags unrelated admixed individuals of similar ancestry at small $N$ (two MXL individuals: 0.113, above true 2nd-degree pairs). A candidate found only by evalAdmix is kept only if it looks IBD-related: $k_0=$ observed / expected opposite homozygotes $<0.8$, with individual allele frequencies from the structure axes (pair left out). Unrelated pairs have $k_0\approx1$ whatever their admixture; 2nd-degree relatives about 0.5.
 
-| true close pair (pedigree kinship) | lowest KING | lowest evalAdmix |
-|:---|:--:|:--:|
-| grandparent YRI – grandchild $\tfrac14$ YRI (0.125) | $-0.013$ | 0.085 |
-| aunt CHB – nephew half CHB/YRI (0.125) | 0.017 | 0.089 |
-| half-sibs CEU$\times$CHB / CEU$\times$YRI (0.125) | 0.069 | 0.089 |
-| parent – child CEU$\times$YRI (0.25) | 0.187 | 0.236 |
+| true close pair (pedigree kinship)                  | lowest KING | lowest evalAdmix |
+|:----------------------------------------------------|:-----------:|:----------------:|
+| grandparent YRI – grandchild $\tfrac14$ YRI (0.125) |  $-0.013$   |      0.085       |
+| aunt CHB – nephew half CHB/YRI (0.125)              |    0.017    |      0.089       |
+| half-sibs CEU$\times$CHB / CEU$\times$YRI (0.125)   |    0.069    |      0.089       |
+| parent – child CEU$\times$YRI (0.25)                |    0.187    |      0.236       |
 
 **Table 5.** KING-robust for relatives of different ancestry (5 replicates per $n$); the screen is 0.04. evalAdmix from the structure axes of the fit.
 
-|  |  |  |  |  |
-|:---|:--:|:--:|:--:|:--:|
-| screen | failures, $k=3$ | failures, $k=10$ | recall of true pairs | relatives’ error |
-|  | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) | ($k=10$; $n=5$ / 10 / 20 / 40) | ($k=10$) |
-| KING only | 0 / 0 / 0 / 0 | 6.7% / 6.7% / 0 / 0 | 88% / 88% / 86% / 90% | 0.25 |
-| evalAdmix, true $K-1$ axes | 0 / 0 / 0 / 0 | 6.7% / 0 / 0 / 0 | 90% / 96% / 97% / 100% | 0.21 |
-| **`dwg`: family axes + evalAdmix + $k_0$** | **0 / 0 / 0 / 0** | **1.7% / 0 / 0 / 0** | **95% / 96% / 97% / 100%** | **0.09** |
+|                                            |                        |                        |                                |                  |
+|:-------------------------------------------|:----------------------:|:----------------------:|:------------------------------:|:----------------:|
+| screen                                     |    failures, $k=3$     |    failures, $k=10$    |      recall of true pairs      | relatives’ error |
+|                                            | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) | ($k=10$; $n=5$ / 10 / 20 / 40) |     ($k=10$)     |
+| KING only                                  |     0 / 0 / 0 / 0      |  6.7% / 6.7% / 0 / 0   |     88% / 88% / 86% / 90%      |       0.25       |
+| evalAdmix, true $K-1$ axes                 |     0 / 0 / 0 / 0      |    6.7% / 0 / 0 / 0    |     90% / 96% / 97% / 100%     |       0.21       |
+| **`dwg`: family axes + evalAdmix + $k_0$** |   **0 / 0 / 0 / 0**    |  **1.7% / 0 / 0 / 0**  |   **95% / 96% / 97% / 100%**   |     **0.09**     |
 
 **Table 6.** The candidate screen without knowing $K$ (12 scenarios including the cross-ancestry ones, 5 replicates; no false pairs). With $k=3$ the recall of `dwg` is the same as with $k=10$; only 2 of 240 runs change by more than 0.01 in min $R^2$ between $k=3$ and $k=10$ (12 with the KING screen alone). The one failure (first cousins, $n=5$) is shared by every method, including the true-$K$ screen.
 
@@ -511,18 +485,18 @@ The GRM diagonal mostly reflects each individual’s heterozygosity, not ancestr
 
 <div class="tabular">
 
-@lcccc@ & $n=5$ & $n=10$ & $n=20$ & $n=40$\
-\
-standard PCA, everyone & 0.128 & 0.390 & 0.736 & 0.992\
-standard PCA, unrelated individuals only & 0.022 & 0.973 & 0.996 & 0.998\
-`aarobust-kin` (diagonal kept) & 0.018 & 0.980 & 0.996 & 0.998\
-`aarobust-kin` `--impute-diag` & **0.989** & **0.997** & 0.998 & 0.999\
-\
-`aarobust-kin` (diagonal kept) & **0.994** & **0.9996** & 0.9999 & 1.0000\
-`aarobust-kin` `--impute-diag` & 0.002 & 0.993 & 0.998 & 0.9995\
-\
-standard PCA & 0.021 & 0.970 & 0.996 & 0.998\
-`--impute-diag` & **0.985** & **0.997** & 0.998 & 0.999\
+@lcccc@ & $n=5$ & $n=10$ & $n=20$ & $n=40$  
+  
+standard PCA, everyone & 0.128 & 0.390 & 0.736 & 0.992  
+standard PCA, unrelated individuals only & 0.022 & 0.973 & 0.996 & 0.998  
+`aarobust-kin` (diagonal kept) & 0.018 & 0.980 & 0.996 & 0.998  
+`aarobust-kin` `--impute-diag` & **0.989** & **0.997** & 0.998 & 0.999  
+  
+`aarobust-kin` (diagonal kept) & **0.994** & **0.9996** & 0.9999 & 1.0000  
+`aarobust-kin` `--impute-diag` & 0.002 & 0.993 & 0.998 & 0.9995  
+  
+standard PCA & 0.021 & 0.970 & 0.996 & 0.998  
+`--impute-diag` & **0.985** & **0.997** & 0.998 & 0.999  
 
 
 **Table 7.** The diagonal kept or imputed (admixTjeck2, 54k SNPs). Keeping the diagonal reproduces standard PCA of the unrelated individuals: it removes the relatives’ effect, but at $n=5$ that PCA itself misses an axis. Imputing the diagonal recovers the true axes, with or without relatives. From $n=20$ per population the two agree.
@@ -559,19 +533,19 @@ After the final PCs, one more pass over the genotypes therefore estimates the re
 
 5.  **evalAdmix kinship**, for comparison: half the correlation of residuals of `--evaladmix` (projection estimator), computed for these pairs only. It equals the `--evaladmix` matrix entries exactly.
 
-| data | relationship | $n$ | KING | detection $\hat\phi$ | **final $\phi$** | $k_0$ | $k_1$ | $k_2$ |
-|:---|:---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| simulated | MZ | 5 | 0.500 | 0.499 | 0.500 | 0.000 | 0.000 | 1.000 |
-| $N=2000$ | parent–offspring | 306 | 0.249 | 0.250 | 0.251 | 0.000 | 0.996 | 0.004 |
-|  | full sibs | 143 | 0.249 | 0.250 | 0.250 | 0.250 | 0.500 | 0.250 |
-|  | 2nd degree | 84 | 0.122 | 0.125 | 0.126 | 0.504 | 0.490 | 0.006 |
-| admixTjeck2 | full sibs | 8 | 0.253 | 0.246 | 0.257 | 0.238 | 0.496 | 0.266 |
-| $N=47$ | parent–offspring | 4 | 0.250 | 0.247 | 0.253 | 0.000 | 0.989 | 0.011 |
-|  | half sibs | 3 | 0.125 | 0.125 | 0.145 | 0.435 | 0.551 | 0.014 |
-|  | avuncular, grandparent | 2 | 0.132 | 0.125 | 0.145 | 0.442 | 0.539 | 0.020 |
-| expected | MZ / PO / FS / 2nd |  | 0.5 / 0.25 / 0.25 / 0.125 |  |  | 0 / 0 / .25 / .5 | 0 / 1 / .5 / .5 | 1 / 0 / .25 / 0 |
+| data        | relationship           | $n$ |           KING            | detection $\hat\phi$ | **final $\phi$** |      $k_0$       |      $k_1$      |      $k_2$      |
+|:------------|:-----------------------|:---:|:-------------------------:|:--------------------:|:----------------:|:----------------:|:---------------:|:---------------:|
+| simulated   | MZ                     |  5  |           0.500           |        0.499         |      0.500       |      0.000       |      0.000      |      1.000      |
+| $N=2000$    | parent–offspring       | 306 |           0.249           |        0.250         |      0.251       |      0.000       |      0.996      |      0.004      |
+|             | full sibs              | 143 |           0.249           |        0.250         |      0.250       |      0.250       |      0.500      |      0.250      |
+|             | 2nd degree             | 84  |           0.122           |        0.125         |      0.126       |      0.504       |      0.490      |      0.006      |
+| admixTjeck2 | full sibs              |  8  |           0.253           |        0.246         |      0.257       |      0.238       |      0.496      |      0.266      |
+| $N=47$      | parent–offspring       |  4  |           0.250           |        0.247         |      0.253       |      0.000       |      0.989      |      0.011      |
+|             | half sibs              |  3  |           0.125           |        0.125         |      0.145       |      0.435       |      0.551      |      0.014      |
+|             | avuncular, grandparent |  2  |           0.132           |        0.125         |      0.145       |      0.442       |      0.539      |      0.020      |
+| expected    | MZ / PO / FS / 2nd     |     | 0.5 / 0.25 / 0.25 / 0.125 |                      |                  | 0 / 0 / .25 / .5 | 0 / 1 / .5 / .5 | 1 / 0 / .25 / 0 |
 
-**Table 8.** Final relatedness (means), from the `.relpairs` output. In the simulation (unlinked SNPs, 30% in families, `detect-white`, $k=4$), the relationship types are fully separated by $k_0$ (sd 0.011 for full sibs). In the small real-data-based set (`aarobust-kin` `--impute-diag`, $k=2$; relatives made from real genotypes with recombination, so the realised relatedness varies around the pedigree value), parent–offspring and full sibs are again separated. The 2nd-degree kinship is about 0.02 too high there, with a small spurious $k_2$. The evalAdmix kinship of the same pairs is biased the other way at this $N$: on average 0.22 for the 1st-degree pairs, because it has no leave-out.
+**Table 8.** Final relatedness (means), from the `.relpairs` output. In the simulation (unlinked SNPs, 30% in families, `detect-white`, $k=4$), the relationship types are fully separated by $k_0$ (sd 0.011 for full sibs). In the small real-data-based set (`aarobust-kin` `--impute-diag`, $k=2$; relatives made from real genotypes with recombination, so the realized relatedness varies around the pedigree value), parent–offspring and full sibs are again separated. The 2nd-degree kinship is about 0.02 too high there, with a small spurious $k_2$. The evalAdmix kinship of the same pairs is biased the other way at this $N$: on average 0.22 for the 1st-degree pairs, because it has no leave-out.
 
 ## 7 Genotype likelihoods (`-G`)
 
@@ -581,7 +555,7 @@ After the final PCs, one more pass over the genotypes therefore estimates the re
 
 ##### The problem.
 
-Without genotype calls the matrix is built from posterior genotype means $E_{is}=\mathrm{E}[g_{is}\mid\text{reads}]$. These shrink towards the prior, more for individuals with low depth, so the structure of a low-depth individual is pulled towards the centre and the covariance of two relatives is attenuated. The diagonal ($\mathrm{E}[g^2]\ne
+Without genotype calls the matrix is built from posterior genotype means $E_{is}=\mathrm{E}[g_{is}\mid\text{reads}]$. These shrink towards the prior, more for individuals with low depth, so the structure of a low-depth individual is pulled towards the center and the covariance of two relatives is attenuated. The diagonal ($\mathrm{E}[g^2]\ne
 \mathrm{E}[g]^2$) is no problem: it is free in `dwg`.
 
 ##### The method.
@@ -601,12 +575,12 @@ Without genotype calls the matrix is built from posterior genotype means $E_{is}
 
 Iterating the prior from the PCs (individual allele frequencies, as in PCAngsd) was worse: at small $N$ an individual’s own genotypes enter its prior and reinforce noise; leaving the individual out made the prior too unstable (up to 10 false pairs per dataset at $n=5$). One round with the HWE prior and deshrinking is both the best and the simplest, and it needs no $k$.
 
-|  | failures $n=10$ (2 / 4 / 8$\times$) | failures $n=5$ (2 / 4 / 8$\times$) | recall |
-|:---|:--:|:--:|:--:|
-| true genotypes (`dwg`) | 0 | 0 | 95–98% |
-| **`dwg`, genotype likelihoods (deshrunk)** | **0 / 0 / 0** | **19% / 12.5% / 6%** | 93–98% |
-| IAF prior, 3 rounds | 12.5% / 6% / 6% | 88% / 25% / 25% | 84–98% |
-| standard PCA of posterior means (PCAngsd style) | 100% / 100% / 94% | 100% | – |
+|                                                 | failures $n=10$ (2 / 4 / 8$\times$) | failures $n=5$ (2 / 4 / 8$\times$) | recall |
+|:------------------------------------------------|:-----------------------------------:|:----------------------------------:|:------:|
+| true genotypes (`dwg`)                          |                  0                  |                 0                  | 95–98% |
+| **`dwg`, genotype likelihoods (deshrunk)**      |            **0 / 0 / 0**            |        **19% / 12.5% / 6%**        | 93–98% |
+| IAF prior, 3 rounds                             |           12.5% / 6% / 6%           |          88% / 25% / 25%           | 84–98% |
+| standard PCA of posterior means (PCAngsd style) |          100% / 100% / 94%          |                100%                |   –    |
 
 **Table 9.** Genotype likelihoods from simulated reads (depth per individual Gamma-distributed around the mean, 1% error) on the admixTjeck2 benchmark (54k SNPs, 8 scenarios incl. relatives of different ancestry, $k=3$). Mean genotype reliability: 0.35, 0.54, 0.73 and 0.89 at 1, 2, 4 and 8$\times$. At $1\times$ no variant works with few individuals per population. PCAone reproduces the Python prototype (`dwg_gl.py`) exactly: identical pairs and $|\cos|=1$ per PC on 24 datasets at 2, 4 and 8$\times$.
 
@@ -636,7 +610,7 @@ This is used for $N>5000$, or with `--robust-engine` `operator`. No $N\times N$ 
 
 2.  *Candidate pairs.* Up to $N=20{,}000$: KING over all pairs, popcounts in tiles of 128 individuals over all threads, keeping only the pairs above 0.04. Above that: the sketch search of Section 8.1 (`--king-search`). The Gram entries of the candidate pairs also come from popcounts. With `--kinship`, the supplied pairs are used and no search is done.
 
-3.  *Fit.* Each iteration is *one pass* over the genotypes, $Z=G(G'V)$ for a block of $k+6$ vectors, with the SNPs split over threads. It is followed by a Rayleigh–Ritz step on $H-S$ and an update of $L$ and $S$ on the diagonal and the candidate entries.
+3.  *Fit.* Each iteration is *one pass* over the genotypes, $Z=G(G'V)$ for a block of $k+6$ vectors, with the SNPs split over threads. It is followed by a Rayleigh–Ritz step on $A/M-S$ and an update of $L$ and $S$ on the diagonal and the candidate entries.
 
 4.  *Whitening.* The block-diagonal $\Sigma$ is applied family by family. The iteration is warm-started from the fit’s eigenvectors multiplied by $\Sigma^{-1/2}$.
 
@@ -650,13 +624,13 @@ With `--robust-pcs` `winsvd`, the final PCs of the whitening modes come from PCA
 
 ### 8.1 Very large $N$: finding the relatives with a sketch
 
-KING over all pairs costs $N^2M/64$ popcounts: 6.5 s at $N=20{,}000$ and 162 s at $N=100{,}000$ ($M=20{,}000$), and it grows with $M$. Above `--king-sketch-min` (20,000) it is replaced by a nearest-neighbour search.
+KING over all pairs costs $N^2M/64$ popcounts: 6.5 s at $N=20{,}000$ and 162 s at $N=100{,}000$ ($M=20{,}000$), and it grows with $M$. Above `--king-sketch-min` (20,000) it is replaced by a nearest-neighbor search.
 
-1.  **Count sketch, in the first pass.** Each SNP $j$ is standardised and added, with a random sign $\sigma(j)$, to one of $s$ columns $h(j)$ of $Y$ ($N\times s$, $s=2048$, `--king-sketch-dim`). $h$ and $\sigma$ come from a hash of the SNP index, so nothing is stored and in-core and out-of-core give the same sketch. The cost is $N\times M$, like one more vector in the pass.
+1.  **Count sketch, in the first pass.** Each SNP $j$ is standardized and added, with a random sign $\sigma(j)$, to one of $s$ columns $h(j)$ of $Y$ ($N\times s$, $s=2048$, `--king-sketch-dim`). $h$ and $\sigma$ come from a hash of the SNP index, so nothing is stored and in-core and out-of-core give the same sketch. The cost is $N\times M$, like one more vector in the pass.
 
-2.  **Nearest neighbours.** After normalising its rows, the correlation of two rows of $Y$ estimates the genotype correlation of the pair: about $2\phi$ for relatives and $0\pm1/\sqrt s$ for unrelated pairs (Figure 5). The $m=5$ most correlated individuals of every individual (`--king-neighbours`) are found with blocked float matrix products: cost $N^2s$, independent of $M$.
+2.  **Nearest neighbors.** After normalizing its rows, the correlation of two rows of $Y$ estimates the genotype correlation of the pair: about $2\phi$ for relatives and $0\pm1/\sqrt s$ for unrelated pairs (Figure 5). The $m=5$ most correlated individuals of every individual (`--king-neighbours`) are found with blocked float matrix products: cost $N^2s$, independent of $M$.
 
-3.  **Adaptive $m$.** If all $m$ neighbours of an individual turn out to be relatives (a large family), its search is extended to $2m$, $4m$, … until one is not.
+3.  **Adaptive $m$.** If all $m$ neighbors of an individual turn out to be relatives (a large family), its search is extended to $2m$, $4m$, … until one is not.
 
 4.  **KING on the candidates.** Exact KING-robust for the about $3.5N$ candidate pairs; those above 0.04 become the candidates of the fit.
 
@@ -677,24 +651,24 @@ No population-structure correction is needed: removing the top PCs from the sket
       PCAone -b data -k 4 --robust --king-search sketch  # sketch, any N
       PCAone -G data.beagle.gz -k 3 --robust             # genotype likelihoods
 
-| option | default | meaning |
-|:---|:---|:---|
-| `--robust` \[mode\] | `auto` | `auto`, `aarobust-kin`, `detect-white`, `cswhite`, `frkin`, `dwg` |
-| `-k` |  | number of PCs written ($K-1$); upper bound for the `detect-white` rank |
-| `--kin-min` | $2^{-3.5}$ | kinship threshold $\tau$ |
-| `--king-screen` | 0.04 | only pairs with KING-robust kinship above this can be related |
-| `--kinship` \[file\] |  | predetermined pairs (KING `.kin0`, `pcaone-ibd`, or $N\times N$ matrix) |
-| `--impute-diag` | off | impute the GRM diagonal (standard PCA or `aarobust-kin`) |
-| `--robust-fixed-rank` | off | `detect-white`: rank $k+1$ instead of the noise edge |
-| `--robust-small-max` | 1000 | `auto` `--impute-diag`: largest $N$ for `aarobust-kin` |
-| `--robust-engine` | `auto` | `dense`, `operator`, `auto` |
-| `--robust-dense-max` | 5000 | `auto` engine: largest $N$ for the dense engine |
-| `--robust-tol` | $10^{-6}$ | operator engine: convergence tolerance |
-| `--king-search` | `auto` | operator engine: `all` (KING over all pairs), `sketch`, `auto` |
-| `--king-sketch-min` | 20,000 | `auto`: sketch search above this $N$ |
-| `--king-sketch-dim` | 2048 | columns of the count sketch |
-| `--king-neighbours` | 5 | neighbours checked per individual (doubled for large families) |
-| `--robust-pcs` | `operator` | final PCs of the whitening modes: `operator` or `winsvd` |
+| option                | default    | meaning                                                                 |
+|:----------------------|:-----------|:------------------------------------------------------------------------|
+| `--robust` \[mode\]   | `auto`     | `auto`, `aarobust-kin`, `detect-white`, `cswhite`, `frkin`, `dwg`       |
+| `-k`                  |            | number of PCs written ($K-1$); upper bound for the `detect-white` rank  |
+| `--kin-min`           | $2^{-3.5}$ | kinship threshold $\tau$                                                |
+| `--king-screen`       | 0.04       | only pairs with KING-robust kinship above this can be related           |
+| `--kinship` \[file\]  |            | predetermined pairs (KING `.kin0`, `pcaone-ibd`, or $N\times N$ matrix) |
+| `--impute-diag`       | off        | impute the GRM diagonal (standard PCA or `aarobust-kin`)                |
+| `--robust-fixed-rank` | off        | `detect-white`: rank $k+1$ instead of the noise edge                    |
+| `--robust-small-max`  | 1000       | `auto` `--impute-diag`: largest $N$ for `aarobust-kin`                  |
+| `--robust-engine`     | `auto`     | `dense`, `operator`, `auto`                                             |
+| `--robust-dense-max`  | 5000       | `auto` engine: largest $N$ for the dense engine                         |
+| `--robust-tol`        | $10^{-6}$  | operator engine: convergence tolerance                                  |
+| `--king-search`       | `auto`     | operator engine: `all` (KING over all pairs), `sketch`, `auto`          |
+| `--king-sketch-min`   | 20,000     | `auto`: sketch search above this $N$                                    |
+| `--king-sketch-dim`   | 2048       | columns of the count sketch                                             |
+| `--king-neighbours`   | 5          | neighbors checked per individual (doubled for large families)           |
+| `--robust-pcs`        | `operator` | final PCs of the whitening modes: `operator` or `winsvd`                |
 
 **Table .** Options of `--robust`.
 
@@ -736,12 +710,12 @@ In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 an
 
 (admixTjeck2; $n=5$, 10, 20 per population; 8 scenarios; 5 replicates; 54k SNPs).
 
-|  | mean min $R^2$ ($k=3$ / $k=10$) | runs with min $R^2<0.95$ | relatives’ error |
-|:---|:--:|:--:|:--:|
-| standard PCA | 0.418 / 0.418 | 79% | 0.75 |
-| `aarobust-kin` `--impute-diag` | 0.995 / 0.995 | 0.8% | 0.07 |
-| `detect-white` (noise-edge rank) | 0.996 / 0.995 | 0% | 0.06–0.14 |
-| `detect-white`, fixed rank $k+1$ | 0.996 / 0.910 | 0% / 24% | 0.06 / 0.32 |
+|                                  | mean min $R^2$ ($k=3$ / $k=10$) | runs with min $R^2<0.95$ | relatives’ error |
+|:---------------------------------|:-------------------------------:|:------------------------:|:----------------:|
+| standard PCA                     |          0.418 / 0.418          |           79%            |       0.75       |
+| `aarobust-kin` `--impute-diag`   |          0.995 / 0.995          |           0.8%           |       0.07       |
+| `detect-white` (noise-edge rank) |          0.996 / 0.995          |            0%            |    0.06–0.14     |
+| `detect-white`, fixed rank $k+1$ |          0.996 / 0.910          |         0% / 24%         |   0.06 / 0.32    |
 
 **Table .** Accuracy of the top $K-1=3$ PCs against the reference truth. Earlier tests (`extensive_tests.pdf`) showed that inbreeding and genotype errors break the HWE-based diagonal correction but not the free diagonal used by `aarobust-kin` and `detect-white`.
 
@@ -749,16 +723,16 @@ In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 an
 
 (simulated: $N=2000$, 5000 and 20,000; 5 populations with $F_{ST}$ from 0.05 to 0.002 plus an admixed group; 10% or 30% of individuals in families; 20k SNPs; 2 replicates).
 
-|  |  | $N=2000$ | $N=5000$ | $N=20{,}000$ |
-|:---|:---|:--:|:--:|:--:|
-| top 4 PCs, min $R^2$ | standard | 0.956 | 0.976 | 0.984 |
-|  | `detect-white` / `cswhite` | 0.957 | 0.971 | 0.979 |
-| relatives’ error | standard | 0.49 | 0.15 | 0.07 |
-|  | `detect-white` / `cswhite` | 0.12 | 0.10 | 0.08 |
-| family axes among the 16 extra PCs ($k=20$) | standard | 16 | 16 | 9.25 |
-|  | `detect-white` / `cswhite` | 0 | 0 | 0 |
-| largest family share $\eta^2$ of an extra PC | standard | 0.91 | 0.83 | 0.57 |
-|  | `detect-white` / `cswhite` | 0.17 | 0.14 | 0.13 |
+|                                              |                            | $N=2000$ | $N=5000$ | $N=20{,}000$ |
+|:---------------------------------------------|:---------------------------|:--------:|:--------:|:------------:|
+| top 4 PCs, min $R^2$                         | standard                   |  0.956   |  0.976   |    0.984     |
+|                                              | `detect-white` / `cswhite` |  0.957   |  0.971   |    0.979     |
+| relatives’ error                             | standard                   |   0.49   |   0.15   |     0.07     |
+|                                              | `detect-white` / `cswhite` |   0.12   |   0.10   |     0.08     |
+| family axes among the 16 extra PCs ($k=20$)  | standard                   |    16    |    16    |     9.25     |
+|                                              | `detect-white` / `cswhite` |    0     |    0     |      0       |
+| largest family share $\eta^2$ of an extra PC | standard                   |   0.91   |   0.83   |     0.57     |
+|                                              | `detect-white` / `cswhite` |   0.17   |   0.14   |     0.13     |
 
 **Table .** Large $N$. A family axis is an extra PC (beyond the four ancestry axes) whose variance is more than half explained by family membership ($\eta^2>0.5$).
 
@@ -772,16 +746,16 @@ In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 an
 
 (`scripts/relatepca/four_methods_bench.py`; admixTjeck2, $k=3$, $n=5$–40 per population; the prototypes, which PCAone reproduces). Six scenarios that break HWE within individuals (an inbred individual, inbred cousins, an inbred population, 1% genotype errors, the last two with MZ twins; 10 replicates) and ten relatives scenarios (including relatives of different ancestry; 5 replicates). The HWE-based Chen & Storey diagonal is shown for reference (same data sets, `results/hwe.tsv`).
 
-|  |  |  |  |  |
-|:---|:--:|:--:|:--:|:--:|
-|  | HWE scenarios: runs wrong | relatives: runs wrong | relatives found | relatives’ error |
-|  | (inbred ind. / inbred pop. / 1% errors) | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40) | ($n=5$) |
-| standard PCA | 30% / 25% / 25% | 100 / 60 / 30 / 0% | – | 0.40 |
-| Chen & Storey diagonal (HWE) | 11% / 24% / 4% | – | – | – |
-| uncentred GRM fit | 0 / 0 / 0 | 0 / 0 / 0 / 0 | 85 / 85 / 82 / 88% | 0.14 |
-| `aarobust-kin` | 0 / 0 / 0 | 2 / 0 / 0 / 0% | 88 / 85 / 82 / 88% | 0.14 |
-| `detect-white` | 0 / 0 / 0 | 0 / 0 / 0 / 0 | 85 / 85 / 77 / 87% | 0.13 |
-| **`dwg`** | 0 / 0 / 0 | 0 / 0 / 0 / 0 | **94 / 95 / 96 / 100%** | **0.11** |
+|                              |                                         |                        |                         |                  |
+|:-----------------------------|:---------------------------------------:|:----------------------:|:-----------------------:|:----------------:|
+|                              |        HWE scenarios: runs wrong        | relatives: runs wrong  |     relatives found     | relatives’ error |
+|                              | (inbred ind. / inbred pop. / 1% errors) | ($n=5$ / 10 / 20 / 40) | ($n=5$ / 10 / 20 / 40)  |     ($n=5$)      |
+| standard PCA                 |             30% / 25% / 25%             |   100 / 60 / 30 / 0%   |            –            |       0.40       |
+| Chen & Storey diagonal (HWE) |             11% / 24% / 4%              |           –            |            –            |        –         |
+| uncentered GRM fit           |                0 / 0 / 0                |     0 / 0 / 0 / 0      |   85 / 85 / 82 / 88%    |       0.14       |
+| `aarobust-kin`               |                0 / 0 / 0                |     2 / 0 / 0 / 0%     |   88 / 85 / 82 / 88%    |       0.14       |
+| `detect-white`               |                0 / 0 / 0                |     0 / 0 / 0 / 0      |   85 / 85 / 77 / 87%    |       0.13       |
+| **`dwg`**                    |                0 / 0 / 0                |     0 / 0 / 0 / 0      | **94 / 95 / 96 / 100%** |     **0.11**     |
 
 **Table 13.** The four methods leave the diagonal free and need no HWE within individuals; the HWE-based correction fails with inbreeding. With relatives all four fix the PCs; `dwg` finds the most relatives (its admixture-aware screen). No method reported false pairs. Wrong: min $R^2<0.95$.
 
@@ -789,25 +763,25 @@ In the example, the detection kinships were 0.249, 0.250, 0.484, 0.250, 0.095 an
 
 Synthetic biobank genotypes with realistic LD (HAPNEST; chromosomes 12–22, LD-pruned to 68,044 SNPs; six ancestries, three of them admixed). $N=5000$ with 30% in families built by transmission with recombination, including relatives of different ancestry; truth from a disjoint reference panel of 3600 (five ancestry axes).
 
-|  | min $R^2$ (5 axes) | relatives’ error | family axes ($k=20$) | recall | grandparent across ancestries | false pairs | time |  |
-|:---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| standard PCA | 0.9987 | 0.048 | 15 of 15 | – | – | – | 14 s |  |
-| `aarobust-kin` | – | – | – | – | – | – | too slow |  |
-| `detect-white` | 0.9977 | 0.028 | 0 | 97.3% | 66% | 0 | 100 s |  |
-| **`dwg`** | **0.9988** | **0.019** | 0 | **98.3%** | **87%** | 0 | **21 s** |  |
+|                | min $R^2$ (5 axes) | relatives’ error | family axes ($k=20$) |  recall   | grandparent across ancestries | false pairs |   time   |     |
+|:---------------|:------------------:|:----------------:|:--------------------:|:---------:|:-----------------------------:|:-----------:|:--------:|:---:|
+| standard PCA   |       0.9987       |      0.048       |       15 of 15       |     –     |               –               |      –      |   14 s   |     |
+| `aarobust-kin` |         –          |        –         |          –           |     –     |               –               |      –      | too slow |     |
+| `detect-white` |       0.9977       |      0.028       |          0           |   97.3%   |              66%              |      0      |  100 s   |     |
+| **`dwg`**      |     **0.9988**     |    **0.019**     |          0           | **98.3%** |            **87%**            |      0      | **21 s** |     |
 
-**Table .** HAPNEST, $N=5000$ (1254 true pairs with pedigree kinship $\ge\tau$; 16 threads; `aarobust-kin` needs a full eigendecomposition per PCP iteration, about an hour per run at this $N$, and was not run). The dense and operator engines of `dwg` give identical pairs and PCs. All 22 pairs `dwg` misses have realised kinship below $\tau$ (PC-adjusted 0.057–0.087): recombination makes realised relatedness of 2nd-degree pairs vary, and these are not detectable by design. Final $(k_0,k_1,k_2)$: parent–offspring (0.00, 1.00, 0.00), full sibs (0.25, 0.50, 0.26), 2nd degree (0.50, 0.50, 0.00), MZ (0, 0, 1).
+**Table .** HAPNEST, $N=5000$ (1254 true pairs with pedigree kinship $\ge\tau$; 16 threads; `aarobust-kin` needs a full eigendecomposition per PCP iteration, about an hour per run at this $N$, and was not run). The dense and operator engines of `dwg` give identical pairs and PCs. All 22 pairs `dwg` misses have realized kinship below $\tau$ (PC-adjusted 0.057–0.087): recombination makes realized relatedness of 2nd-degree pairs vary, and these are not detectable by design. Final $(k_0,k_1,k_2)$: parent–offspring (0.00, 1.00, 0.00), full sibs (0.25, 0.50, 0.26), 2nd degree (0.50, 0.50, 0.00), MZ (0, 0, 1).
 
 ##### A second real panel (1000 Genomes with ASW).
 
 CEU, CHB, YRI and the admixed ASW (366 individuals, 100k complete SNPs); relatives made from real genotypes with recombination, including ASW families and relatives of different ancestry; $n=5$–20 per population, 3 replicates, 10 scenarios.
 
-|  | failures ($n=5$ / 10 / 20) | recall ($n=5$ / 10 / 20) | grandparent across ancestries | relatives’ error ($k=2$ / 10) |
-|:---|:--:|:--:|:--:|:--:|
-| standard PCA | 27% / 10% / 0 | – | – | 0.23 |
-| `aarobust-kin` | 0 / 0 / 0 | 84% / 78% / 80% | 44% | 0.045 / 0.045 |
-| `detect-white` | 0 / 0 / 0 | 83% / 78% / 78% | 44% | 0.03 / 0.07 |
-| **`dwg`** | 0 / 0 / 0 | **90% / 95% / 96%** | **100%** | 0.035 / 0.040 |
+|                | failures ($n=5$ / 10 / 20) | recall ($n=5$ / 10 / 20) | grandparent across ancestries | relatives’ error ($k=2$ / 10) |
+|:---------------|:--------------------------:|:------------------------:|:-----------------------------:|:-----------------------------:|
+| standard PCA   |       27% / 10% / 0        |            –             |               –               |             0.23              |
+| `aarobust-kin` |         0 / 0 / 0          |     84% / 78% / 80%      |              44%              |         0.045 / 0.045         |
+| `detect-white` |         0 / 0 / 0          |     83% / 78% / 78%      |              44%              |          0.03 / 0.07          |
+| **`dwg`**      |         0 / 0 / 0          |   **90% / 95% / 96%**    |           **100%**            |         0.035 / 0.040         |
 
 **Table .** 1000 Genomes panel. The pairs reported beyond the simulated pedigree are real relatives in the panel (e.g. NA20317/NA20318, kinship 0.25), found by every robust method.
 
@@ -815,21 +789,21 @@ CEU, CHB, YRI and the admixed ASW (366 individuals, 100k complete SNPs); relativ
 
 (simulated as above, 30% in families, 20k SNPs; truth: `plink2` KING over all pairs).
 
-|  | candidates per person | MZ | 1st degree | 2nd degree | 3rd degree |
-|:---|:--:|:--:|:--:|:--:|:--:|
-| $N=20{,}000$, sketch $s=2048$, $m=5$ | 3.5 | 100% | 100% | 100% | 98.8% |
-| strong structure ($F_{ST}\le0.15$) | 3.8 | 100% | 100% | 100% | 98.7% |
-| $s=1024$ | 3.5 | 100% | 100% | 100% | 79% |
-| -bit signs, 2048 bits | 3.4 | 100% | 100% | 100% | 66% |
-| $N=100{,}000$, sketch $s=2048$, $m=5$ | 3.6 | 520/520 | 23,300/23,300 | 4060/4060 | – |
+|                                       | candidates per person |   MZ    |  1st degree   | 2nd degree | 3rd degree |
+|:--------------------------------------|:---------------------:|:-------:|:-------------:|:----------:|:----------:|
+| $N=20{,}000$, sketch $s=2048$, $m=5$  |          3.5          |  100%   |     100%      |    100%    |   98.8%    |
+| strong structure ($F_{ST}\le0.15$)    |          3.8          |  100%   |     100%      |    100%    |   98.7%    |
+| $s=1024$                              |          3.5          |  100%   |     100%      |    100%    |    79%     |
+| -bit signs, 2048 bits                 |          3.4          |  100%   |     100%      |    100%    |    66%     |
+| $N=100{,}000$, sketch $s=2048$, $m=5$ |          3.6          | 520/520 | 23,300/23,300 | 4060/4060  |     –      |
 
 **Table .** Recall of the true pairs among the checked candidates. 3rd-degree pairs lie below the threshold $\tau$ and do not affect the PCs.
 
-| $N=100{,}000$, 16 threads, in-core | finding the relatives | final relatedness | total |
-|:---|:--:|:--:|:--:|
-| `detect-white`, KING over all pairs | 162 s | 20 s | 232 s |
-| `detect-white`, sketch search | 52 s | 20 s | 118 s |
-| standard PCAone (`--svd` 2) | – | – | 148 s |
+| $N=100{,}000$, 16 threads, in-core  | finding the relatives | final relatedness | total |
+|:------------------------------------|:---------------------:|:-----------------:|:-----:|
+| `detect-white`, KING over all pairs |         162 s         |       20 s        | 232 s |
+| `detect-white`, sketch search       |         52 s          |       20 s        | 118 s |
+| standard PCAone (`--svd` 2)         |           –           |         –         | 148 s |
 
 **Table .** Run time at $N=100{,}000$. Both robust runs give identical related pairs (27,880) and PCs. The first pass takes 11 s and the 22 genotype products 17–20 s.
 
@@ -871,4 +845,4 @@ CEU, CHB, YRI and the admixed ASW (366 individuals, 100k complete SNPs); relativ
 
 - **The rank choice** could be offered to the rest of PCAone.
 
-- **`dwg` at very large $N$** needs a second sketch neighbour search for the evalAdmix screen (about 50 s at $N=100{,}000$). One search on the residual sketch could serve both screens.
+- **`dwg` at very large $N$** needs a second sketch neighbor search for the evalAdmix screen (about 50 s at $N=100{,}000$). One search on the residual sketch could serve both screens.

@@ -383,7 +383,8 @@ def link(ax, a, b, text="", dx=0.0, dy=0.0):
                 va="center")
 
 
-def fig_engines(out):
+def fig_engines(out, slides=False):
+    """slides=True: the talk's notation, the iterate Q (here V, which the talk uses for eigenvectors)"""
     fig, ax = plt.subplots(figsize=(13, 5.2))
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -414,15 +415,18 @@ def fig_engines(out):
     link(ax, (0.2, 0.375), (0.2, 0.325))
     link(ax, (0.2, 0.235), (0.2, 0.175))
     box(ax, 0.73, 0.42, 0.42, 0.09, "pass 1: $D_i$, diag($GG'$), noise edge, bit-packed genotypes [+ count sketch]\n"
-        "KING-robust over all pairs (N $\\leq$ 20,000) or on sketch neighbors (N > 20,000)\n"
+        "KING over all pairs (N $\\leq$ 5000) or on sketch neighbors (N > 5000)\n"
         "->  candidate pairs > 0.04   [or --kinship: predetermined pairs, no search]")
     box(ax, 0.73, 0.28, 0.42, 0.09, "fit: each iteration = one pass  $Z = G\\,W^{-1}(G'V)$ (dwg)  (SNPs over threads)\n"
         "Rayleigh-Ritz on (A - S), update L and S on the candidates; family axes;\n"
-        "evalAdmix screen from the residual sketch + $k_0$  -  nothing N $\\times$ N")
+        "evalAdmix screen (all pairs; residual sketch for N > 5000) + $k_0$  -  nothing N $\\times$ N")
     box(ax, 0.73, 0.14, 0.42, 0.07, "whitening: block-diagonal $\\Sigma$ (families), warm start from the fit;"
         " final relatedness\n->  .eigvecs  .eigvals  .relpairs   (in-core or out-of-core -m)")
     link(ax, (0.73, 0.375), (0.73, 0.325))
     link(ax, (0.73, 0.235), (0.73, 0.175))
+    if slides:
+        for t in ax.texts:
+            t.set_text(t.get_text().replace("$Z = G\\,W^{-1}(G'V)$", "$Z = G\\,W^{-1}(G'Q)$"))
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
 
@@ -619,6 +623,10 @@ def main():
         for i, j, phi in c["pairs"]:
             f.write(f"{i} {j} {pop[i]} {pop[j]} phi={phi:.3f} ped={ds['Kped'][i, j]:.3f}\n")
 
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "engines-slides":
+    fig_engines(sys.argv[2], slides=True)
+    sys.exit()
 
 if __name__ == "__main__":
     main()
