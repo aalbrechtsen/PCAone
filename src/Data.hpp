@@ -123,6 +123,9 @@ class Data {
   // sites in the order of G's columns. In-core read_all() makes it when
   // packed_pca(); out-of-core set_packed_sites(), without the calls.
   std::unique_ptr<PCAone::PackedGenotypes> packed;
+  // --robust dwg (operator engine) on a BED: the 2-bit calls are kept in-core
+  // (packed, G is not formed) and read as such out-of-core (Robust.cpp)
+  bool robust_packed = false;
   Mat2D G;                         // genotype matrix, can be initial E or centered E, which is nsamples x nsnps;
   Mat2D P;                         // normalized genotype likelihoods, (nsamples x 2) x nsnps.
   Mat1D F;                         // observed or estimated population allele frequency

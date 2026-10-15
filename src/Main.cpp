@@ -170,7 +170,6 @@ static int run(int argc, char* argv[]) {
       data = new FilePgen(params);
     else
       data = new FileBeagle(params);  // genotype likelihoods (dwg only, in-core)
-    data->prepare();
     if (params.robust == "auto") {
       // dwg (dense or operator engine); --impute-diag belongs to aarobust-kin
       if (params.impute_diag) {
@@ -182,6 +181,9 @@ static int run(int argc, char* argv[]) {
       }
       cao.print(tick.date(), "--robust auto: N =", data->nsamples, ", using", params.robust);
     }
+    // dwg in the operator engine works on the 2-bit calls of a BED (no decoded G)
+    data->robust_packed = dwg_uses_packed(params, data->nsamples);
+    data->prepare();
     if (params.robust == "aarobust-kin") warn_small_sample(params, data->nsamples);
     run_robust(data, params);
     delete data;

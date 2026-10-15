@@ -68,7 +68,7 @@ const uchar* FileBed::read_records(uint64 start_idx, uint64 count) {
 }
 
 void FileBed::read_all() {
-  if (packed_pca()) {
+  if (packed_pca() || robust_packed) {
     read_all_packed();
     return;
   }

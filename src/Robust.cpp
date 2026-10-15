@@ -452,6 +452,29 @@ struct PackedGeno {
       }
     }
   }
+  // the same from 2-bit BED records (B bytes each, the first sample in the low
+  // bits; code 3: 0, 2: het, 0: 2), b sites from first; tiles of 64 samples
+  void add_records(const uint8_t* rec, uint64 B, Eigen::Index first, Eigen::Index b, int nthreads) {
+    const Eigen::Index nq = (N + 63) / 64;
+#pragma omp parallel for num_threads(nthreads) schedule(dynamic)
+    for (Eigen::Index t = 0; t < nq; ++t) {
+      const Eigen::Index i0 = t * 64, i1 = std::min(N, i0 + 64);
+      for (Eigen::Index j = 0; j < b; ++j) {
+        const Eigen::Index s = first + j, w = s / 64;
+        const uint64_t bit = uint64_t(1) << (s % 64);
+        const uint8_t* r = rec + (uint64)j * B;
+        for (Eigen::Index i = i0; i < i1; ++i) {
+          const int c = (r[i >> 2] >> ((i & 3) * 2)) & 3;
+          if (c == 3)
+            h0[i * W + w] |= bit;
+          else if (c == 2)
+            het[i * W + w] |= bit;
+          else if (c == 0)
+            h2[i * W + w] |= bit;
+        }
+      }
+    }
+  }
   int nhet(Eigen::Index i) const {
     int c = 0;
     for (Eigen::Index w = 0; w < W; ++w) c += __builtin_popcountll(het[i * W + w]);
@@ -491,22 +514,73 @@ std::vector<int> het_counts(const PackedGeno& P) {
 }
 
 // KING-robust kinship for all pairs, in tiles of individuals over threads;
-// returns the pairs above screen
-std::vector<Pair> king_all_pairs(const PackedGeno& P, double screen, int nthreads) {
-  const Eigen::Index N = P.N, T = 128, nb = (N + T - 1) / T;
+// returns the pairs above screen. With gram, also the raw Gram G G' (g scale,
+// exact counts) of all pairs, diagonal included. The words are taken in
+// chunks, so the rows of both tiles stay in the cache while every pair of the
+// tiles adds its counts.
+std::vector<Pair> king_all_pairs(const PackedGeno& P, double screen, int nthreads, Mat2D* gram = nullptr) {
+  const Eigen::Index N = P.N, W = P.W, T = 64, WB = 512, nb = (N + T - 1) / T;
   const std::vector<int> nh = het_counts(P);
+  if (gram) gram->resize(N, N);
   std::vector<std::vector<Pair>> found(std::max(1, nthreads));
-#pragma omp parallel for num_threads(nthreads) schedule(dynamic) collapse(2)
+  std::vector<std::pair<Eigen::Index, Eigen::Index>> tiles;
   for (Eigen::Index bi = 0; bi < nb; ++bi)
-    for (Eigen::Index bj = 0; bj < nb; ++bj) {
-      if (bj < bi) continue;
+    for (Eigen::Index bj = bi; bj < nb; ++bj) tiles.emplace_back(bi, bj);
+#pragma omp parallel num_threads(nthreads)
+  {
+    // counts of the pairs of a tile: het-het, opposite homozygotes, and for the
+    // Gram het-hom2 and hom2-hom2
+    std::vector<uint64_t> hh(T * T), i0(T * T), hd(T * T), dd(T * T);
+#pragma omp for schedule(dynamic)
+    for (size_t t = 0; t < tiles.size(); ++t) {
+      const Eigen::Index bi = tiles[t].first, bj = tiles[t].second;
+      const Eigen::Index a0 = bi * T, a1 = std::min(N, a0 + T), c0 = bj * T, c1 = std::min(N, c0 + T);
+      std::fill(hh.begin(), hh.end(), 0);
+      std::fill(i0.begin(), i0.end(), 0);
+      if (gram) {
+        std::fill(hd.begin(), hd.end(), 0);
+        std::fill(dd.begin(), dd.end(), 0);
+      }
+      for (Eigen::Index w0 = 0; w0 < W; w0 += WB) {
+        const Eigen::Index w1 = std::min(W, w0 + WB);
+        for (Eigen::Index i = a0; i < a1; ++i) {
+          const uint64_t *hi = &P.het[i * W], *ai = &P.h0[i * W], *ci = &P.h2[i * W];
+          for (Eigen::Index j = std::max(c0, bi == bj ? i + 1 : c0); j < c1; ++j) {
+            const uint64_t *hj = &P.het[j * W], *aj = &P.h0[j * W], *cj = &P.h2[j * W];
+            uint64_t x = 0, y = 0;
+            for (Eigen::Index w = w0; w < w1; ++w) {
+              x += __builtin_popcountll(hi[w] & hj[w]);
+              y += __builtin_popcountll(ai[w] & cj[w]) + __builtin_popcountll(ci[w] & aj[w]);
+            }
+            const Eigen::Index q = (i - a0) * T + (j - c0);
+            hh[q] += x;
+            i0[q] += y;
+            if (gram) {
+              uint64_t u = 0, v = 0;
+              for (Eigen::Index w = w0; w < w1; ++w) {
+                u += __builtin_popcountll(hi[w] & cj[w]) + __builtin_popcountll(ci[w] & hj[w]);
+                v += __builtin_popcountll(ci[w] & cj[w]);
+              }
+              hd[q] += u;
+              dd[q] += v;
+            }
+          }
+        }
+      }
       auto& out = found[omp_get_thread_num()];
-      for (Eigen::Index i = bi * T; i < std::min(N, (bi + 1) * T); ++i)
-        for (Eigen::Index j = std::max(i + 1, bj * T); j < std::min(N, (bj + 1) * T); ++j) {
-          const double kin = king_pair(P, nh, i, j);
+      for (Eigen::Index i = a0; i < a1; ++i)
+        for (Eigen::Index j = std::max(c0, bi == bj ? i + 1 : c0); j < c1; ++j) {
+          const Eigen::Index q = (i - a0) * T + (j - c0);
+          // as king_pair()
+          const double mn = std::max(std::min(nh[i], nh[j]), 1);
+          const double kin = (double(hh[q]) - 2.0 * double(i0[q])) / (2.0 * mn) + 0.5 - (nh[i] + nh[j]) / (4.0 * mn);
           if (kin > screen) out.emplace_back(i, j, kin);
+          if (gram) (*gram)(i, j) = (*gram)(j, i) = double(hh[q]) + 2.0 * double(hd[q]) + 4.0 * double(dd[q]);
         }
     }
+  }
+  if (gram)
+    for (Eigen::Index i = 0; i < N; ++i) (*gram)(i, i) = P.gram(i, i);
   std::vector<Pair> pairs;
   for (auto& f : found) pairs.insert(pairs.end(), f.begin(), f.end());
   std::sort(pairs.begin(), pairs.end());
@@ -554,6 +628,33 @@ struct RelSketch {
         if (sc[j] == 0.0) continue;
         float* y = Y.col(col[j]).data();
         for (Eigen::Index i = r0; i < r1; ++i) y[i] += float(sc[j] * (X(i, j) - f[j]));
+      }
+    }
+  }
+  // the same from 2-bit BED records, f the allele frequency (0..1) of each site;
+  // tiles of 64 samples, so their rows of Y stay in the cache
+  void add_records(const uint8_t* rec, uint64 B, Eigen::Index first, Eigen::Index b, const double* f, int nthreads) {
+    std::vector<Eigen::Index> col(b);
+    std::vector<float> val(4 * b, 0.0f);
+    std::vector<char> on(b, 0);
+    for (Eigen::Index j = 0; j < b; ++j) {
+      const double v = 2.0 * f[j] * (1.0 - f[j]);
+      const uint64_t h = mix64(uint64_t(first + j));
+      col[j] = Eigen::Index((h >> 1) % uint64_t(dim));
+      const double sc = v > 1e-12 ? ((h & 1) ? 2.0 : -2.0) / std::sqrt(v) : 0.0;
+      on[j] = sc != 0.0;
+      for (int c = 0; c < 4; ++c) val[4 * j + c] = c == 1 ? 0.0f : float(sc * (BED2GENO[c] - f[j]));
+    }
+    const Eigen::Index nq = (N + 63) / 64;
+#pragma omp parallel for num_threads(nthreads) schedule(dynamic)
+    for (Eigen::Index t = 0; t < nq; ++t) {
+      const Eigen::Index i0 = t * 64, i1 = std::min(N, i0 + 64);
+      for (Eigen::Index j = 0; j < b; ++j) {
+        if (!on[j]) continue;
+        float* y = Y.col(col[j]).data();
+        const uint8_t* r = rec + (uint64)j * B;
+        const float* vj = &val[4 * j];
+        for (Eigen::Index i = i0; i < i1; ++i) y[i] += vj[(r[i >> 2] >> ((i & 3) * 2)) & 3];
       }
     }
   }
@@ -679,6 +780,74 @@ void add_GGtV(const GenoBlock& G, const Mat2D& V, Mat2D& Z, int nthreads) {
   for (const auto& z : Zt) Z += z;
 }
 
+// sites [0, b) of 2-bit BED records (B bytes each, 4 samples a byte, the first
+// in the low bits) decoded to X, N x b on the 0..1 scale (BED2GENO)
+static void decode_records(const uint8_t* rec, uint64 B, Eigen::Index N, Eigen::Index b, Mat2D& X, int nthreads) {
+  X.resize(N, b);
+#pragma omp parallel for num_threads(nthreads) schedule(static)
+  for (Eigen::Index j = 0; j < b; ++j) {
+    const uint8_t* r = rec + (uint64)j * B;
+    double* x = X.col(j).data();
+    for (Eigen::Index i = 0; i < N; ++i) x[i] = BED2GENO[(r[i >> 2] >> ((i & 3) * 2)) & 3];
+  }
+}
+
+// the blocks of 2-bit calls (data->robust_packed): fn(records, first site,
+// number of sites); in-core 4096 sites at a time, out-of-core the blocks of -m
+static void for_each_packed(Data* data, const Param& params,
+                            const std::function<void(const uint8_t*, Eigen::Index, Eigen::Index)>& fn) {
+  if (!params.out_of_core) {
+    for (Eigen::Index c = 0; c < (Eigen::Index)data->nsnps; c += 4096)
+      fn(data->packed->record(c), c, std::min<Eigen::Index>(4096, data->nsnps - c));
+  } else {
+    data->check_file_offset_first_var();
+    for (uint bi = 0; bi < data->nblocks; ++bi)
+      fn(data->read_block_packed(data->start[bi], data->stop[bi]), data->start[bi],
+         data->stop[bi] - data->start[bi] + 1);
+  }
+}
+
+// out(i, :) += sum over the sites [j0, j0 + D.rows()) of h[c_ij] * D(j, :), with
+// c_ij the 2-bit code of sample i at site j (rec: the records of these sites)
+// and h a value per code (the missing code 1 counts 0)
+struct CodeSums {
+  std::unique_ptr<PCAone::PackedGenotypes> P;
+  CodeSums(Eigen::Index N, Eigen::Index M, const double h[4])
+      : P(std::make_unique<PCAone::PackedGenotypes>(nullptr, N, M, h, 1)) {}
+  void add(const uint8_t* rec, Eigen::Index j0, const Mat2D& D, Mat2D& out) {
+    const Eigen::Index n = D.rows();
+    P->set_sites(j0, Mat1D::Zero(n), Mat1D::Ones(n), Mat1D::Zero(n));
+    P->mul_X_Y(j0, D, out, true, rec);
+  }
+};
+
+// one pass over the genotypes (raw, 0..1 scale) calling fn(block, first site):
+// in-core blocks of G, or of the 2-bit calls decoded (data->robust_packed);
+// out-of-core the blocks of -m (after the first pass the reader returns raw
+// genotypes, as the allele frequencies are known)
+static void for_each_block(Data* data, const Param& params, const std::function<void(const GenoBlock&, Eigen::Index)>& fn) {
+  if (data->robust_packed) {
+    const Eigen::Index N = data->nsamples;
+    const uint64 B = ((uint64)N + 3) / 4;
+    Mat2D X;
+    for_each_packed(data, params, [&](const uint8_t* rec, Eigen::Index j0, Eigen::Index n) {
+      decode_records(rec, B, N, n, X, params.threads);
+      fn(X, j0);
+    });
+    return;
+  }
+  if (!params.out_of_core) {
+    for (Eigen::Index c = 0; c < data->G.cols(); c += 4096)
+      fn(data->G.middleCols(c, std::min<Eigen::Index>(4096, data->G.cols() - c)), c);
+  } else {
+    data->check_file_offset_first_var();
+    for (uint bi = 0; bi < data->nblocks; ++bi) {
+      data->read_block_initial(data->start[bi], data->stop[bi], false);
+      fn(data->G, data->start[bi]);
+    }
+  }
+}
+
 struct GenoProduct {
   Data* data;
   const Param& params;
@@ -689,15 +858,7 @@ struct GenoProduct {
     ++passes;
     const auto t0 = std::chrono::steady_clock::now();
     Mat2D Z = Mat2D::Zero(V.rows(), V.cols());
-    if (!params.out_of_core) {
-      add_GGtV(data->G, V, Z, params.threads);
-    } else {
-      data->check_file_offset_first_var();
-      for (uint bi = 0; bi < data->nblocks; ++bi) {
-        data->read_block_initial(data->start[bi], data->stop[bi], false);
-        add_GGtV(data->G, V, Z, params.threads);
-      }
-    }
+    for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index) { add_GGtV(X, V, Z, params.threads); });
     Z *= 4.0 / M;
     secs += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return Z;
@@ -1167,17 +1328,47 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
     }
     s0 += b;
   };
-  if (!params.out_of_core) {
-    for (Eigen::Index c = 0; c < data->G.cols(); c += 4096)
-      add_block(data->G.middleCols(c, std::min<Eigen::Index>(4096, data->G.cols() - c)));
-  } else {
-    // allele frequencies are known after the first pass, so the reader returns
-    // raw genotypes (as in GenoProduct)
-    data->check_file_offset_first_var();
-    for (uint bi = 0; bi < data->nblocks; ++bi) {
-      data->read_block_initial(data->start[bi], data->stop[bi], false);
-      add_block(data->G);
+  if (data->robust_packed && !pcp) {
+    // the same sums on the 2-bit calls (x = g/2 scale, as add_block): X' V and
+    // X X' V by the packed products, the per-sample sums by code tables, and
+    // only the members' calls decoded
+    const uint64 B = ((uint64)N + 3) / 4;
+    PCAone::PackedGenotypes px(nullptr, N, M, BED2GENO, 1);
+    const double hx2[4] = {1.0, 0.0, 0.25, 0.0}, hx[4] = {1.0, 0.0, 0.5, 0.0}, hxq[4] = {0.0, 0.0, 0.25, 0.0};
+    CodeSums Sx2(N, M, hx2), Sx(N, M, hx), Sxq(N, M, hxq);
+    Mat2D a2 = Mat2D::Zero(N, 1), a1 = Mat2D::Zero(N, 1), aq = Mat2D::Zero(N, 1);
+    for_each_packed(data, params, [&](const uint8_t* rec, Eigen::Index j0, Eigen::Index n) {
+      px.set_sites(j0, Mat1D::Zero(n), Mat1D::Ones(n), Mat1D::Zero(n));
+      Mat2D T(n, k1);
+      px.mul_Xt_Y(j0, V, T, rec);
+      R.middleCols(j0, n) = 2.0 * T.transpose();
+      px.mul_X_Y(j0, T, AV, true, rec);
+      const Mat2D one = Mat2D::Ones(n, 1);
+      Sx2.add(rec, j0, one, a2);
+      Sx.add(rec, j0, one, a1);
+      Sxq.add(rec, j0, one, aq);
+#pragma omp parallel for num_threads(params.threads)
+      for (Eigen::Index t = 0; t < ni; ++t) {
+        const Eigen::Index i = members[t];
+        int8_t* dst = &Gsub[t * M + j0];
+        for (Eigen::Index j = 0; j < n; ++j) {
+          const int c = (rec[(uint64)j * B + (i >> 2)] >> ((i & 3) * 2)) & 3;
+          dst[j] = c == 0 ? 2 : (c == 2 ? 1 : 0);
+        }
+      }
+    });
+    Adiag = a2.col(0);
+    bsum = a1.col(0);
+    dsum = aq.col(0);
+#pragma omp parallel for num_threads(params.threads)
+    for (Eigen::Index c = 0; c < np; ++c) {
+      const int8_t *gi = &Gsub[sub[std::get<0>(pairs[c])] * M], *gj = &Gsub[sub[std::get<1>(pairs[c])] * M];
+      int64_t acc = 0;
+      for (Eigen::Index s = 0; s < M; ++s) acc += gi[s] * gj[s];
+      Ap(c) = 0.25 * (double)acc;  // x scale
     }
+  } else {
+    for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index) { add_block(X); });
   }
   AV *= 4.0;
   Adiag *= 4.0;
@@ -1299,12 +1490,20 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
 static void write_outputs(Data* data, const Param& params, Eigen::Index N, const Mat2D& U, const Mat1D& w,
                           const std::vector<Pair>& pairs, const std::function<double(int, int)>& king_of,
                           const std::vector<FinalRel>* fin_in = nullptr, const PcpIaf* pcp = nullptr) {
-  write_tsv(params.fileout + ".eigvecs", U);
+  // the sign of a PC is arbitrary, and the eigensolvers may pick either for
+  // sums in another order: the entry of largest magnitude is made positive
+  Mat2D Us = U;
+  for (Eigen::Index c = 0; c < Us.cols(); ++c) {
+    Eigen::Index imax;
+    Us.col(c).cwiseAbs().maxCoeff(&imax);
+    if (Us(imax, c) < 0) Us.col(c) *= -1.0;
+  }
+  write_tsv(params.fileout + ".eigvecs", Us);
   write_tsv(params.fileout + ".eigvals", w);
   const SampleIds sid = read_sample_ids(params);
   // the PCs with the FID and IID of each sample, as plink2's .eigenvec
   if (params.file_t == FileType::PLINK || params.file_t == FileType::PGEN)
-    write_eigvecs2(params.fileout + ".eigvecs2", U, sid);
+    write_eigvecs2(params.fileout + ".eigvecs2", Us, sid);
   const std::vector<FinalRel> fin = fin_in ? *fin_in : final_relatedness(data, params, U, pairs, pcp);
   const String1D& ids = sid.iid;
   std::ofstream rp(params.fileout + ".relpairs");
@@ -1743,16 +1942,7 @@ static std::vector<double> dwg_k0(Data* data, const Param& params, const Mat2D& 
       for (Eigen::Index j = 0; j < b; ++j) Gsub[t * M + s0 + j] = (int8_t)(2.0 * X(members[t], j) + 0.5);
     s0 += b;
   };
-  if (!params.out_of_core) {
-    for (Eigen::Index c = 0; c < data->G.cols(); c += 4096)
-      add_block(data->G.middleCols(c, std::min<Eigen::Index>(4096, data->G.cols() - c)));
-  } else {
-    data->check_file_offset_first_var();
-    for (uint bi = 0; bi < data->nblocks; ++bi) {
-      data->read_block_initial(data->start[bi], data->stop[bi], false);
-      add_block(data->G);
-    }
-  }
+  for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index) { add_block(X); });
   const Mat2D VtV = V.transpose() * V;
 #pragma omp parallel for num_threads(params.threads)
   for (size_t c = 0; c < pairs.size(); ++c) {
@@ -1800,20 +1990,6 @@ static void add_GGtV_w(const GenoBlock& G, const Mat1D& scale, const Mat2D& V, M
     Zt[omp_get_thread_num()].noalias() += G.middleCols(s0, len) * T;
   }
   for (const auto& z : Zt) Z += z;
-}
-
-// one pass over the genotypes (raw, 0..1 scale) calling fn(block, first site)
-static void for_each_block(Data* data, const Param& params, const std::function<void(const GenoBlock&, Eigen::Index)>& fn) {
-  if (!params.out_of_core) {
-    for (Eigen::Index c = 0; c < data->G.cols(); c += 4096)
-      fn(data->G.middleCols(c, std::min<Eigen::Index>(4096, data->G.cols() - c)), c);
-  } else {
-    data->check_file_offset_first_var();
-    for (uint bi = 0; bi < data->nblocks; ++bi) {
-      data->read_block_initial(data->start[bi], data->stop[bi], false);
-      fn(data->G, data->start[bi]);
-    }
-  }
 }
 
 // raw and SNP-weighted Gram entries (sum over sites of g_i g_j, and of
@@ -1927,7 +2103,50 @@ static void run_dwg_operator(Data* data, const Param& params) {
     Msites += b;
   };
   tick.clock();
-  if (!params.out_of_core) {
+  if (data->robust_packed) {
+    // the same on the 2-bit calls: the allele frequencies from the code counts,
+    // the per-sample sums by code tables (g: 2, het, 0 for codes 0, 2, 3), and
+    // the KING masks and the sketch straight from the calls
+    const uint64 B = ((uint64)N + 3) / 4;
+    const double hg[4] = {2.0, 0.0, 1.0, 0.0}, hg2[4] = {4.0, 0.0, 1.0, 0.0}, hhet[4] = {0.0, 0.0, 1.0, 0.0};
+    CodeSums Sg(N, Msnp, hg), Sg2(N, Msnp, hg2), Shet(N, Msnp, hhet);
+    Mat2D ag = Mat2D::Zero(N, 1), ag2 = Mat2D::Zero(N, 2), ahet = Mat2D::Zero(N, 1);
+    uint64 nmiss = 0;
+    for_each_packed(data, params, [&](const uint8_t* rec, Eigen::Index j0, Eigen::Index n) {
+      std::vector<double> f(n);
+#pragma omp parallel for num_threads(params.threads) reduction(+ : nmiss, edge_s, Ms)
+      for (Eigen::Index j = 0; j < n; ++j) {
+        const uint8_t* r = rec + (uint64)j * B;
+        uint64 cnt[4] = {0, 0, 0, 0};
+        for (Eigen::Index i = 0; i < N; ++i) ++cnt[(r[i >> 2] >> ((i & 3) * 2)) & 3];
+        nmiss += cnt[1];
+        const double fj = (double(cnt[0]) + 0.5 * double(cnt[2])) / double(N), w = 2.0 * fj * (1.0 - fj);
+        f[j] = fj;
+        if (w > VAR_TOL) {
+          wscale(j0 + j) = 2.0 / std::sqrt(w);
+          wscale2(j0 + j) = 1.0 / w;
+          const double eg2 = 2.0 * fj * (1.0 - fj) + 4.0 * fj * fj;
+          edge_s += (eg2 * eg2 - 16.0 * fj * fj * fj * fj) / (w * w);
+          ++Ms;
+        }
+      }
+      const Mat2D one = Mat2D::Ones(n, 1);
+      Mat2D D2(n, 2);
+      D2.col(0).setOnes();
+      D2.col(1) = wscale2.segment(j0, n);
+      Sg.add(rec, j0, one, ag);
+      Sg2.add(rec, j0, D2, ag2);
+      Shet.add(rec, j0, one, ahet);
+      if (internal_king) pk.add_records(rec, B, j0, n, params.threads);
+      if (use_sketch || ea_sketch) sk.add_records(rec, B, j0, n, f.data(), params.threads);
+      Msites += n;
+    });
+    if (nmiss > 0) cao.error("--robust requires complete genotypes (no missing values)");
+    Dsum = ahet.col(0);
+    Adiag = ag2.col(0);
+    Asdiag = ag2.col(1);
+    gsum = ag.col(0);
+  } else if (!params.out_of_core) {
     if ((data->G.array() < 0).any()) cao.error("--robust requires complete genotypes (no missing values)");
     for (Eigen::Index s0 = 0; s0 < data->G.cols(); s0 += 4096)
       add_block(data->G.middleCols(s0, std::min<Eigen::Index>(4096, data->G.cols() - s0)));
@@ -1948,6 +2167,7 @@ static void run_dwg_operator(Data* data, const Param& params) {
   const double edge = 2.0 * std::sqrt(edge_s / (Msd * Msd)) * std::sqrt((double)N);
   cao.print(tick.date(), "robust PCA: first pass over", Msites, "sites in", tick.reltime(), "seconds");
   Eigen::MatrixXf Yraw = sk.Y;  // N x dim, for the residual sketch
+  Mat2D Araw;                   // raw Gram G G' (g scale) for the exact evalAdmix screen
   if (internal_king) {
     tick.clock();
     std::vector<Pair> kp;
@@ -1956,7 +2176,9 @@ static void run_dwg_operator(Data* data, const Param& params) {
       uint64 nchecked = 0, nextended = 0;
       kp = king_sketch_pairs(pk, sk, params.king_neighbours, params.king_screen, params.threads, nchecked, nextended);
     } else {
-      kp = king_all_pairs(pk, params.king_screen, params.threads);
+      // the exact evalAdmix screen needs the raw Gram of all pairs: counted here
+      // with KING (exact, as the product of the decoded genotypes)
+      kp = king_all_pairs(pk, params.king_screen, params.threads, ea_sketch ? nullptr : &Araw);
     }
     for (const auto& [i, j, kin] : kp) {
       king_map[{i, j}] = kin;
@@ -1968,18 +2190,47 @@ static void run_dwg_operator(Data* data, const Param& params) {
   }
   sk = RelSketch();
 
+  // G diag(s^2) G' V for a per-site scale s (0..1 scale): on the 2-bit calls
+  // (PackedPca.hpp, X = s x per site) when they are kept, else on the decoded blocks
+  std::unique_ptr<PCAone::PackedGenotypes> pk_ooc;  // out-of-core: the products get each block's calls
+  if (data->robust_packed && params.out_of_core)
+    pk_ooc = std::make_unique<PCAone::PackedGenotypes>(nullptr, N, Msnp, BED2GENO, 1);
+  const Mat1D* packed_scale = nullptr;  // the scale set in the in-core calls
+  auto GsGsV = [&](const Mat1D& s, const Mat2D& V) {
+    Mat2D Z = Mat2D::Zero(N, V.cols());
+    if (!data->robust_packed) {
+      for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index first) {
+        add_GGtV_w(X, s.segment(first, X.cols()), V, Z, params.threads);
+      });
+    } else if (!params.out_of_core) {
+      PCAone::PackedGenotypes& Pk = *data->packed;
+      if (packed_scale != &s) {
+        Pk.set_sites(0, Mat1D::Zero(Msnp), s, Mat1D::Zero(Msnp));
+        packed_scale = &s;
+      }
+      Mat2D T(Msnp, V.cols());
+      Pk.mul_Xt_Y(0, V, T);
+      Pk.mul_X_Y(0, T, Z);
+    } else {
+      data->check_file_offset_first_var();
+      for (uint bi = 0; bi < data->nblocks; ++bi) {
+        const Eigen::Index j0 = data->start[bi], n = data->stop[bi] - j0 + 1;
+        const uint8_t* rec = data->read_block_packed(data->start[bi], data->stop[bi]);
+        pk_ooc->set_sites(j0, Mat1D::Zero(n), s.segment(j0, n), Mat1D::Zero(n));
+        Mat2D T(n, V.cols());
+        pk_ooc->mul_Xt_Y(j0, V, T, rec);
+        pk_ooc->mul_X_Y(j0, T, Z, true, rec);
+      }
+    }
+    return Z;
+  };
+  const Mat1D gscale = Mat1D::Constant(Msnp, 2.0);  // g = 2x
   // GRM-scale operator A_s V and the raw Gram operator (1/M) G G' V (g scale)
   uint64 passes = 0;
   auto As_apply = [&](const Mat2D& V) {
     ++passes;
-    Mat2D Z = Mat2D::Zero(V.rows(), V.cols());
-    for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index first) {
-      const Mat1D sc = wscale.segment(first, X.cols());
-      add_GGtV_w(X, sc, V, Z, params.threads);
-    });
-    return Mat2D(Z / Msd);
+    return Mat2D(GsGsV(wscale, V) / Msd);
   };
-  GenoProduct gp{data, params, M};
   // exact A_s entries of the candidate pairs (popcounts cannot weight SNPs)
   std::map<std::pair<int, int>, double> asmap;
   auto add_cands = [&](const std::vector<std::pair<int, int>>& cs) {
@@ -2159,9 +2410,9 @@ static void run_dwg_operator(Data* data, const Param& params) {
   // screen (no second neighbour search for candidates that did not become pairs)
   std::set<std::pair<int, int>> key, used(cand.begin(), cand.end());
   for (const auto& [i, j, phi] : F.pairs) key.emplace(i, j);
-  // exact screen: the raw Gram G G' (g scale) once, for the evalAdmix kinship of all pairs
-  Mat2D Araw;
-  if (!ea_sketch) {
+  // exact screen: the raw Gram G G' (g scale) once, for the evalAdmix kinship of
+  // all pairs (with the internal KING it was counted there)
+  if (!ea_sketch && Araw.size() == 0) {
     const auto ta0 = std::chrono::steady_clock::now();
     Araw = Mat2D::Zero(N, N);
     for_each_block(data, params, [&](const GenoBlock& X, Eigen::Index) {
@@ -2244,7 +2495,7 @@ static void run_dwg_operator(Data* data, const Param& params) {
       // exact evalAdmix kinship for these pairs (projection estimator, as --evaladmix)
       Mat1D raw, wtd;
       pair_sums(data, params, wscale2, ce, raw, wtd);
-      const Mat2D AV = M * gp.apply(Vx);  // G G' Vx on the g scale
+      const Mat2D AV = GsGsV(gscale, Vx);  // G G' Vx on the g scale
       const Mat2D Pinv = (Vx.transpose() * Vx).completeOrthogonalDecomposition().pseudoInverse();
       const Mat2D CV = AV - M * gbar * (gbar.transpose() * Vx);
       const Mat2D VCV = Vx.transpose() * CV, VDV = Vx.transpose() * D.asDiagonal() * Vx, VP = Vx * Pinv;
@@ -2570,6 +2821,21 @@ static void run_dwg_gl(Data* data, const Param& params) {
   write_outputs(data, params, N, U, wv, pairs_out, [&](int i, int j) { return king(i, j); }, &fin);
 }
 
+bool dwg_uses_operator(const Param& params, uint64 nsamples) {
+  if (params.file_t == FileType::BEAGLE) return false;  // run_dwg_gl
+  // the operator engine is faster at every N in-core (N = 1000: 1.1 s against
+  // 4.5 s); out-of-core the dense engine reads the file once
+  if (params.robust_engine == "auto") return !params.out_of_core || nsamples > (uint64)params.robust_dense_max;
+  return params.robust_engine == "operator" || params.robust_engine == "iram";
+}
+
+bool dwg_uses_packed(const Param& params, uint64 nsamples) {
+  // per pass and genotype at M = 500,000 (64 threads): N = 1000 0.17 ns packed
+  // against 0.30 ns decoded; N = 101 (M = 1.4M) 0.97 against 0.41 ns
+  return params.file_t == FileType::PLINK && params.robust == "dwg" && !params.nopacked && nsamples >= 500 &&
+         dwg_uses_operator(params, nsamples);
+}
+
 void run_robust(Data* data, const Param& params) {
   if (params.inbreed == 2 && params.robust != "aarobust-kin")
     cao.error("--inbreed 2 within a --robust run needs --robust aarobust-kin (this run uses " + params.robust + ")");
@@ -2580,10 +2846,7 @@ void run_robust(Data* data, const Param& params) {
   bool op = params.robust != "aarobust-kin" && params.robust != "diag-impute" &&
             (params.robust_engine == "operator" || params.robust_engine == "iram" ||
              (params.robust_engine == "auto" && data->nsamples > (uint)params.robust_dense_max));
-  // dwg: the operator engine is faster at every N in-core (N = 1000: 1.1 s
-  // against 4.5 s); out-of-core the dense engine reads the file once
-  if (params.robust == "dwg" && params.robust_engine == "auto")
-    op = !params.out_of_core || data->nsamples > (uint)params.robust_dense_max;
+  if (params.robust == "dwg") op = dwg_uses_operator(params, data->nsamples);
   if (op && params.robust == "dwg") return run_dwg_operator(data, params);
   if (op) return run_robust_operator(data, params);
   const Eigen::Index N = data->nsamples;

@@ -30,4 +30,11 @@
  */
 void run_robust(Data* data, const Param& params);
 
+// whether --robust dwg runs in the operator engine (no N x N matrix) for N samples
+bool dwg_uses_operator(const Param& params, uint64 nsamples);
+
+// whether --robust dwg keeps the 2-bit calls of a BED and computes its products
+// on them (from 500 samples: below, the decoded products are faster)
+bool dwg_uses_packed(const Param& params, uint64 nsamples);
+
 #endif  // PCAONE_ROBUST_
