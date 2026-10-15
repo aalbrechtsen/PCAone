@@ -2,9 +2,10 @@
 ##
 ## plot-loadings.R: plot PCAone SNP loadings along the genome.
 ##
-## `PCAone --printv` writes <prefix>.loadings (one row per variant, one column
+## A PCAone run writes <prefix>.loadings (one row per variant, one column
 ## per PC) and <prefix>.mbim (chr, id, cM, bp, A1, A2, freq). For each PC the
-## script plots the max |loading| in consecutive bins of variants. Bins never
+## script weights each PC by its singular value from <prefix>.sigvals and
+## plots the max |weighted loading| in consecutive bins of variants. Bins never
 ## span two chromosomes, so millions of variants plot quickly and no peak is
 ## lost. Each PC's top variant is marked and printed as a table.
 ##
@@ -23,6 +24,7 @@
 ## From R:
 ##   source("plot-loadings.R")
 ##   d <- read_loadings("pcaone.loadings", "pcaone.mbim", pcs = 1:10)
+##   d <- subset_variants(d, d$snp %in% c("rs123", "rs456"))
 ##   plot_loadings(d, highlight = 1:2, groups = list(HLA = c(6, 12)))
 ##   loading_peaks(d)
 ##
@@ -122,7 +124,10 @@ pc_group <- function(pcs, groups) {
 #' @param pcs      PCs to read (default all)
 #' @param chr      keep only these chromosomes, e.g. c(1:22, "X")
 #' @param region   keep one region, "6:25M-35M" or list(chr, from, to)
-read_loadings <- function(loadings, bim = NULL, pcs = NULL, chr = NULL, region = NULL) {
+#' @param sigvals  .sigvals file (default: matching .loadings prefix)
+#' @param weighted multiply each PC by its singular value (default TRUE)
+read_loadings <- function(loadings, bim = NULL, pcs = NULL, chr = NULL, region = NULL,
+                          sigvals = NULL, weighted = TRUE) {
   if (!requireNamespace("data.table", quietly = TRUE))
     stop("plot-loadings.R needs the data.table package: install.packages('data.table')")
   nc <- ncol(data.table::fread(loadings, nrows = 1L, header = FALSE))
@@ -132,6 +137,20 @@ read_loadings <- function(loadings, bim = NULL, pcs = NULL, chr = NULL, region =
   V <- data.table::fread(loadings, header = FALSE, select = pcs, showProgress = FALSE)
   data.table::setnames(V, paste0("PC", pcs))
   n <- nrow(V)
+  weights <- rep(1, length(pcs))
+  if (weighted) {
+    if (is.null(sigvals)) sigvals <- paste0(sub("\\.loadings$", "", loadings), ".sigvals")
+    if (!file.exists(sigvals))
+      stop("cannot find ", sigvals, "; give --sigvals or use --no-weights (weighted = FALSE in R)")
+    ## PCAone's #nsamples,nsnps[,key=value] header is a comment to scan().
+    values <- scan(sigvals, what = double(), comment.char = "#", quiet = TRUE)
+    if (length(values) != nc)
+      stop(sprintf("%s has %d singular values but %s has %d PCs", sigvals, length(values), loadings, nc))
+    if (any(!is.finite(values) | values < 0))
+      stop("singular values must be finite and non-negative in ", sigvals)
+    weights <- values[pcs]
+    for (j in seq_along(pcs)) data.table::set(V, j = j, value = V[[j]] * weights[j])
+  }
 
   chrv <- snp <- bp <- NULL
   if (!is.null(bim)) {
@@ -164,8 +183,33 @@ read_loadings <- function(loadings, bim = NULL, pcs = NULL, chr = NULL, region =
     snp <- snp[row]
     bp <- bp[row]
   }
-  structure(list(V = V, chr = chrv, snp = snp, bp = bp, row = row, pcs = pcs, file = loadings),
+  structure(list(V = V, chr = chrv, snp = snp, bp = bp, row = row, pcs = pcs, file = loadings,
+                 weighted = weighted, weights = weights, sigvals = if (weighted) sigvals else NULL),
             class = "pcaone_loadings")
+}
+
+#' Subset variants while keeping loadings and variant metadata aligned.
+#'
+#' @param d        A pcaone_loadings object returned by read_loadings().
+#' @param keep     A logical mask of length nrow(d$V), or integer row indices.
+#' @return A pcaone_loadings object retaining the original file row numbers.
+#' @export
+subset_variants <- function(d, keep) {
+  if (is.logical(keep)) {
+    stopifnot(length(keep) == nrow(d$V), !anyNA(keep))
+    keep <- which(keep)
+  }
+  stopifnot(
+    is.numeric(keep), length(keep) > 0L, !anyNA(keep),
+    all(keep == floor(keep)),
+    all(keep >= 1L & keep <= nrow(d$V))
+  )
+
+  d$V <- d$V[keep, ]
+  for (field in c("chr", "snp", "bp", "row")) {
+    if (!is.null(d[[field]])) d[[field]] <- d[[field]][keep]
+  }
+  d
 }
 
 #' Max |loading| per bin of `window` consecutive variants (per chromosome).
@@ -207,7 +251,7 @@ bin_loadings <- function(d, window = NULL, target = 4000L, xaxis = c("index", "b
   for (j in seq_along(d$pcs))
     M[, j] <- data.table::data.table(b = bin, v = abs(d$V[[j]]))[, list(m = max(v)), by = b]$m
   list(x = (xb$lo + xb$hi) / 2, run = run[!duplicated(bin)],
-       M = M, bounds = bounds, window = window, xaxis = xaxis, pcs = d$pcs)
+       M = M, bounds = bounds, window = window, xaxis = xaxis, pcs = d$pcs, weighted = isTRUE(d$weighted))
 }
 
 #' The top variant of each PC, with the share of the PC's sum of squared
@@ -291,7 +335,8 @@ loading_peaks <- function(d, groups = NULL) {
 
 .ylab <- function(b, e) {
   w <- format(b$window, big.mark = ",")
-  what <- if (b$window > 1L) paste0("max |loading| per ", w, " SNPs") else "|loading|"
+  quantity <- if (isTRUE(b$weighted)) "|loading x singular value|" else "|loading|"
+  what <- if (b$window > 1L) paste0("max ", quantity, " per ", w, " SNPs") else quantity
   if (e == 0) what else bquote(.(what) ~ "(" * symbol("\264") * 10^.(e) * ")")
 }
 
@@ -470,14 +515,16 @@ plot_loadings <- function(d, mode = c("overlay", "panel"), highlight = NULL, gro
 
 ## ---- command line ----------------------------------------------------------
 
-PL_USAGE <- "Plot PCAone SNP loadings (from --printv) along the genome.
+PL_USAGE <- "Plot PCAone SNP loadings (.loadings) along the genome.
 
 Usage: Rscript plot-loadings.R -p PREFIX [options]
        Rscript plot-loadings.R -l FILE.loadings [-b FILE.mbim] [options]
 
 Input
-  -p, --prefix P      reads P.loadings and P.mbim (or P.bim)
+  -p, --prefix P      reads P.loadings, P.sigvals and P.mbim (or P.bim)
   -l, --loadings F    loadings file (overrides --prefix)
+      --sigvals F     singular values [matching loadings prefix.sigvals]
+      --no-weights    plot raw loadings instead of loading x singular value
   -b, --bim F         .mbim/.bim with the same variants; without it the x axis
                       is the variant index
       --pcs S         PCs to plot, e.g. 1-10 or 1,3,5 [all]
@@ -508,8 +555,8 @@ region (an inversion, the HLA, a centromere) drives the PC."
 
 parse_args <- function(args) {
   short <- c(p = "prefix", l = "loadings", b = "bim", o = "out", h = "help")
-  flags <- c("help", "no-peaks", "fixed-y")
-  known <- c("prefix", "loadings", "bim", "out", "pcs", "chr", "region", "mode", "highlight",
+  flags <- c("help", "no-peaks", "fixed-y", "no-weights")
+  known <- c("prefix", "loadings", "sigvals", "bim", "out", "pcs", "chr", "region", "mode", "highlight",
              "groups", "window", "xaxis", "title", "width", "height", "res", "cex", "peaks-out", flags)
   opt <- list()
   i <- 1L
@@ -577,7 +624,8 @@ main <- function(args = commandArgs(trailingOnly = TRUE)) {
   out <- if (is.null(o$out)) paste0(base, ".loadings.png") else o$out
   num <- function(x, def) if (is.null(x)) def else as.numeric(x)
 
-  d <- read_loadings(loadings, bim, pcs = parse_int_set(o$pcs), chr = o$chr, region = o$region)
+  d <- read_loadings(loadings, bim, pcs = parse_int_set(o$pcs), chr = o$chr, region = o$region,
+                     sigvals = o$sigvals, weighted = !isTRUE(o$`no-weights`))
   message(sprintf("read %s variants x %d PCs from %s", format(length(d$row), big.mark = ","),
                   length(d$pcs), loadings))
   width <- num(o$width, 11)

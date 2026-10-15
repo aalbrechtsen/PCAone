@@ -51,4 +51,17 @@ void FileBin::read_block_initial(uint64 start_idx, uint64 stop_idx, bool standar
     // -m run a different, centred PCA from the in-core one.
     if (params.scale >= 1) G.col(i).array() -= G.col(i).mean();
   }
+  // While this block is used, the kernel reads the next one into the page
+  // cache (after the last block, the first one again). No buffer is held, so
+  // the memory is that of -m.
+  if (start_idx == 0) first_block_size = actual_block_size;
+  if (params.noprefetch) return;
+  const uint64 next = stop_idx + 1 < nsnps ? stop_idx + 1 : 0;
+  const uint64 count = next ? std::min<uint64>(actual_block_size, nsnps - next) : first_block_size;
+  try {
+    if (!readahead) readahead = std::make_unique<PCAone::ReadAhead>(params.filein);
+    readahead->hint(ibyte * 2 + next * bytes_per_snp, count * bytes_per_snp);
+  } catch (const std::exception&) {
+    // only a hint
+  }
 }

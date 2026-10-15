@@ -16,7 +16,9 @@
 
 #include "Cmd.hpp"
 #include "Data.hpp"
+#include "TextIO.hpp"
 #include "Utils.hpp"
+#include "Variants.hpp"
 
 using namespace std;
 
@@ -193,8 +195,8 @@ Mat2D read_ld_pcs(const Param& params, uint nsamples) {
   Eigen::HouseholderQR<Mat2D> qr(U);
   Mat2D Q = qr.householderQ() * Mat2D::Identity(U.rows(), U.cols());
   if (U.cols() < ntotal)
-    cao.print(tick.date(), "compute the ancestry adjusted LD, removing the top", U.cols(), "of the", ntotal,
-              "PCs in", params.fileU);
+    cao.print(tick.date(), "compute the ancestry adjusted LD, removing the top", U.cols(), "of the", ntotal, "PCs in",
+              params.fileU);
   else
     cao.print(tick.date(), "compute the ancestry adjusted LD, removing", U.cols(), "PCs in", params.fileU);
   return Q;
@@ -205,7 +207,7 @@ Mat2D read_ld_pcs(const Param& params, uint nsamples) {
 // centred data and are orthogonal to the intercept, so the residuals stay
 // centred; re-centring only removes rounding. Per-site scaling commutes with
 // the projection, so whether the PCA standardised the sites does not matter.
-// Why this equals the old G - USV': docs/ld-ancestry-adjusted.md
+// Why this equals the old G - USV': docs/small-n/ld.md (Method details)
 void adjust_for_pcs(Mat2D& G, const Mat2D& Q) {
   if (Q.size() == 0) return;
   G.noalias() -= Q * (Q.transpose() * G);
@@ -213,7 +215,9 @@ void adjust_for_pcs(Mat2D& G, const Mat2D& Q) {
 }
 
 LDColumns::LDColumns(Data* data_, const Mat2D& Q_)
-    : data(data_), Q(Q_), ooc(data_->params.out_of_core) {
+    : data(data_),
+      Q(Q_),
+      ooc(data_->params.out_of_core) {
   if (ooc) {
     rewind();
   } else {
@@ -373,10 +377,10 @@ void write_pruned_snp_ids(const String1D& variants, const std::string& fileout, 
     const auto fields = split_string(line, " \t");
     if (keep(i))
       ofs_in << fields[0] << "\t" << fields[1] << "\t" << fields[2] << "\t" << fields[3] << "\t" << fields[4] << "\t"
-             << fields[5] << std::endl;
+             << fields[5] << '\n';
     else
       ofs_out << fields[0] << "\t" << fields[1] << "\t" << fields[2] << "\t" << fields[3] << "\t" << fields[4] << "\t"
-              << fields[5] << std::endl;
+              << fields[5] << '\n';
     i++;
   }
 }
@@ -388,7 +392,11 @@ void write_pruned_snp_ids(const String1D& variants, const std::string& fileout, 
 // the same decisions as one window at a time. Leads removed within their own
 // batch waste their row, so R grows while most leads survive and shrinks when
 // they do not. F is filled as blocks are read (-m); every site used is read.
-void ld_prune(LDColumns& X, const Mat1D& F, const String1D& variants, const SNPld& snp, double r2_tol,
+void ld_prune(LDColumns& X,
+              const Mat1D& F,
+              const String1D& variants,
+              const SNPld& snp,
+              double r2_tol,
               const std::string& fileout) {
   cao.print(tick.date(), "LD pruning, the site with the lower MAF of each pair is removed");
   const uint N = X.nsamples();
@@ -544,7 +552,7 @@ void ld_clump_single_pheno(const std::string& fileout,
                            const std::vector<UMapIntPds>& pvals_per_chr) {
   // the columns of G have unit norm (LDColumns), so r is their dot product
   std::ofstream ofs(fileout);
-  ofs << head + "\tSP2" << std::endl;
+  ofs << head + "\tSP2\n";
   for (int c = 0; c < (int)bp_per_chr.size(); c++) {
     const auto idx = idx_per_chr[c];
     const auto bp = bp_per_chr[c];
@@ -615,7 +623,7 @@ void ld_clump_single_pheno(const std::string& fileout,
           k++;
         }
       }
-      ofs << std::endl;
+      ofs << '\n';
     }
     // end current chr
   }
@@ -667,11 +675,12 @@ void ld_r2(LDColumns& X, const String1D& variants, const SNPld& snp, const std::
         for (int j = 1; j < snp.we[x]; ++j) {
           const uint k = i + j;
           const double r = C(i - lo, k - lo);
+          char num[TEXT_NUM_MAX];
           s += bims[i];
           s += '\t';
           s += bims[k];
           s += '\t';
-          s += std::to_string(r * r);
+          s.append(num, put_f6(r * r, num) - num);  // as std::to_string, without its allocation
           s += '\n';
         }
       }

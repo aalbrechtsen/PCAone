@@ -21,6 +21,7 @@
 #include <map>
 #include <sstream>
 
+#include "TextIO.hpp"
 #include "Utils.hpp"
 
 // floor on the eigenvalues of each Sigma_f. Duplicates / MZ twins (phi = 1/2)
@@ -39,35 +40,6 @@ static bool is_number(const std::string& s) {
   return end != s.c_str() && *end == '\0';
 }
 
-String1D read_sample_ids(const Param& params) {
-  String1D ids;
-  const std::string sep{" \t"};
-  std::string line;
-  if (params.file_t == FileType::PLINK) {
-    std::ifstream ifs(params.filein + ".fam");
-    while (std::getline(ifs, line)) {
-      auto tok = split_string(line, sep);
-      if (tok.size() >= 2) ids.push_back(tok[1]);
-    }
-  } else if (params.file_t == FileType::PGEN) {
-    std::ifstream ifs(params.filein + ".psam");
-    int col = 0;
-    while (std::getline(ifs, line)) {
-      if (line.empty()) continue;
-      if (line[0] == '#') {
-        if (line.size() > 1 && line[1] == '#') continue;
-        auto tok = split_string(line, sep);
-        for (size_t c = 0; c < tok.size(); ++c)
-          if (lower(tok[c]) == "iid") col = c;
-        continue;
-      }
-      auto tok = split_string(line, sep);
-      if ((int)tok.size() > col) ids.push_back(tok[col]);
-    }
-  }
-  return ids;
-}
-
 // union-find over samples
 static int find_root(std::vector<int>& parent, int i) {
   while (parent[i] != i) i = parent[i] = parent[parent[i]];
@@ -76,7 +48,7 @@ static int find_root(std::vector<int>& parent, int i) {
 
 std::vector<std::tuple<int, int, double>> read_kinship_pairs(const Param& params, uint N, double kmin) {
   const std::string sep{" \t,"};
-  String1D ids = read_sample_ids(params);
+  const String1D ids = read_sample_ids(params).iid;
   if (!ids.empty() && ids.size() != N) cao.error("number of sample IDs does not match the number of samples");
   std::unordered_map<std::string, int> id2idx;
   for (size_t i = 0; i < ids.size(); ++i) {

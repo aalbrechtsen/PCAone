@@ -185,18 +185,11 @@ static int run(int argc, char* argv[]) {
     if (params.robust == "aarobust-kin") warn_small_sample(params, data->nsamples);
     run_robust(data, params);
     delete data;
-    if (params.file_t == FileType::PLINK)
-      make_plink2_eigenvec_file(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
-                                params.filein + ".fam");
-    else if (params.file_t == FileType::PGEN)
-      make_plink2_eigenvec_from_psam(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
-                                     params.filein + ".psam");
     return bye();
   }
 
   const bool ooc_permutation = params.perm && params.out_of_core;
-  if (params.perm_mem > 0 && !(ooc_permutation && params.file_t == FileType::PLINK))
-    cao.warn("--perm-mem only applies to the out-of-core winSVD on PLINK input with shuffling; ignored");
+  bool bed_copy = false;  // --bed-copy: the BED was rewritten to <out>.perm.*, removed at the end
 
   if (ooc_permutation) {
     tick.clock();
@@ -207,9 +200,10 @@ static int run(int argc, char* argv[]) {
       // Logical permutation is initialized after prepare(), when blocksize is known.
       data = new FilePgen(params);
     } else if (params.file_t == FileType::BGEN) {
-      auto perm = permute_bgen(params.filein, params.fileout, params.threads, params.seed);
+      // a logical permutation, as for PGEN: the blocks read the shuffled
+      // variants from the input itself
       data = new FileBgen(params);
-      data->perm = perm;
+      data->perm = compute_bgen_perm(data->nsnps, params.seed);
     } else if (params.file_t == FileType::CSV) {
       auto perm = shuffle_csvzstd_to_bin(params.filein, params.fileout, params.buffer, params.scale, params.scaleFactor,
                                          params.seed);
@@ -219,7 +213,7 @@ static int run(int argc, char* argv[]) {
     } else {
       cao.error("wrong file type used!");
     }
-    if (params.file_t != FileType::PGEN && params.file_t != FileType::PLINK)
+    if (params.file_t != FileType::PGEN && params.file_t != FileType::PLINK && params.file_t != FileType::BGEN)
       cao.print(tick.date(), "elapsed time of permuting data:", tick.reltime(), " seconds");
   } else {
     if (params.file_t == FileType::PLINK) {
@@ -264,11 +258,20 @@ static int run(int argc, char* argv[]) {
   if (params.k >= rank_max)
     cao.error("-k/--pc " + std::to_string(params.k) + " must be smaller than the number of samples and of sites (" +
               std::to_string(data->nsamples) + " and " + std::to_string(data->nsnps) + ")");
+  if (params.em_k >= rank_max)
+    cao.error("--em-k " + std::to_string(params.em_k) + " must be smaller than the number of samples and of sites (" +
+              std::to_string(data->nsamples) + " and " + std::to_string(data->nsnps) + ")");
   // the RSVD cannot use more test vectors, nor the IRAM more Lanczos vectors, than that
   if (params.k + params.oversamples > rank_max) {
     params.oversamples = rank_max - params.k;
     cao.warn("--oversamples reduced to " + std::to_string(params.oversamples) +
              " so that k + oversamples <= " + std::to_string(rank_max));
+  }
+  if (params.em_k + params.em_oversamples > rank_max) {
+    params.em_oversamples = rank_max - params.em_k;
+    if (params.em_k != params.k)  // otherwise the warning above said it
+      cao.warn("--oversamples of the EM iterations reduced to " + std::to_string(params.em_oversamples) +
+               " so that --em-k + oversamples <= " + std::to_string(rank_max));
   }
   if (params.ncv > rank_max) {
     params.ncv = rank_max;
@@ -276,10 +279,8 @@ static int run(int argc, char* argv[]) {
   }
   if (ooc_permutation && params.file_t == FileType::PLINK) {
     tick.clock();
-    if (params.perm_mem > 0)
-      static_cast<FileBed*>(data)->apply_logical_permutation(params);
-    else
-      static_cast<FileBed*>(data)->apply_permutation(params);
+    bed_copy = static_cast<FileBed*>(data)->apply_permutation(params);
+    data->metadata_permuted = bed_copy;
     cao.print(tick.date(), "elapsed time of permuting data:", tick.reltime(), " seconds");
   }
   if (ooc_permutation && params.file_t == FileType::PGEN) {
@@ -315,26 +316,16 @@ static int run(int argc, char* argv[]) {
   delete data;
   delete whitener;
 
-  if (params.file_t == FileType::PLINK)
-    make_plink2_eigenvec_file(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
-                              params.filein + ".fam");
-  else if (params.file_t == FileType::PGEN)
-    make_plink2_eigenvec_from_psam(params.k, params.fileout + ".eigvecs2", params.fileout + ".eigvecs",
-                                   params.filein + ".psam");
-
   // remove temp files if verbose < 3
   if (ooc_permutation && params.verbose < 3) {
-    // only the copy <out>.perm.* is removed; with --perm-mem nothing was written
-    // and filein is still the user's input
-    if (params.file_t == FileType::PLINK && params.perm_mem == 0 && params.filein == params.fileout + ".perm") {
+    if (params.file_t == FileType::PLINK && bed_copy) {
       for (auto suf : std::vector<std::string>{".bed", ".bim", ".fam"}) {
         std::filesystem::path tmpfile{params.filein + suf};
         std::filesystem::remove(tmpfile);
       }
     }
     // a shuffled CSV is read back as BINARY, from <out>.perm.bin
-    if ((params.file_t == FileType::BGEN) || (params.file_t == FileType::CSV) ||
-        (params.file_t == FileType::BINARY)) {
+    if ((params.file_t == FileType::CSV) || (params.file_t == FileType::BINARY)) {
       std::filesystem::path tmpfile{params.filein};
       std::filesystem::remove(tmpfile);
     }

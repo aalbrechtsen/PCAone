@@ -29,6 +29,11 @@ class Param {
   uint nsnps = 0;
   uint k = 10;
   uint ref_k = 0;  // leading PCs of the -P/--USV reference used by a two-stage analysis (-k); 0: all
+  // PCs that model the individual allele frequencies in the EM-PCA iterations
+  // (--emu, --pcangsd). --em-k sets it, and the final matrix is then decomposed
+  // for -k PCs; otherwise it equals -k. max_k() sizes what holds either.
+  uint em_k = 0;
+  uint max_k() const { return k > em_k ? k : em_k; }
   uint maxp = 20;  // maximum number of power iterations
   uint threads = 12;
   uint bands = 64;
@@ -49,13 +54,10 @@ class Param {
   uint imaxiter = 1000;
   double itol = 1e-6;
   // for halko
-  uint oversamples = 10;
+  uint oversamples = 10;     // of the RSVD for -k PCs; at least -k
+  uint em_oversamples = 10;  // of the RSVD in the EM iterations, for --em-k PCs; at least --em-k
   double tol = 1e-5;
   uint buffer = 2;
-  double perm_mem = 0;  // GiB; > 0 reads the out-of-core BED permutation logically
-  uint perm_chunk = 1;     // --perm-mem: SNPs dealt to a band at a time
-  bool perm_rotate = false;  // --perm-mem: random band rotation per stretch of W chunks
-  bool perm_adapt = false;   // --perm-mem: start with small windows, grow while waiting for I/O
   uint rand = 1;
   // for ld stuff
   bool print_r2 = false;
@@ -86,9 +88,12 @@ class Param {
   int scale = SCALE_STANDARDIZE_GENETIC;  // default: standardize genetic data by sqrt(ploidy*f*(1-f))
   bool hardcall = false;
   bool groff = false;
-  bool printv = false;
+  bool printv = true;   // write .loadings and .mbim; --no-loadings turns it off
   bool missme = false;  // keep track of missing information
   bool noshuffle = false;
+  bool noprefetch = false;  // out-of-core: no background read of the next block
+  bool nopacked = false;    // --svd 1/2 of a BED: decode the calls to doubles (PackedPca.hpp)
+  bool bedcopy = false;     // out-of-core winSVD: rewrite the BED shuffled to <out>.perm.* first
   bool emu = false;
   bool pcangsd = false;  // enable pcangsd procedure
   // bool fancyem = false;  // true if emu/pcangsd + svd 2
@@ -126,6 +131,8 @@ class Param {
   bool evaladmix_pairs = false;
   double evaladmix_kin = 0;
   double evaladmix_unrel = 0;
+  // --evaladmix-ibd: also the IBD sharing probabilities k0, k1, k2
+  bool evaladmix_ibd = false;
   // bool estpi = false; // true if output pi is needed
 
   std::ostringstream ss;

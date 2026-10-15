@@ -6,16 +6,15 @@
 
 #include "FileCsv.hpp"
 
+#include "LinAlg.hpp"
+#include "Stats.hpp"
+
 using namespace std;
 
 // normalize count x of sample i according to --scale. libsize is only
 // populated for the modes that need it (see csv_needs_libsize).
-static inline double normalize_count(double x,
-                                     int scale,
-                                     const std::vector<double>& libsize,
-                                     size_t i,
-                                     double median_libsize,
-                                     double scaleFactor) {
+static inline double normalize_count(
+    double x, int scale, const std::vector<double>& libsize, size_t i, double median_libsize, double scaleFactor) {
   if (!csv_needs_libsize(scale)) return x;
   const double total = libsize[i];
   if (total <= 0) return 0.0;  // empty sample: all its counts are zero, keep them at 0 instead of 0/0
@@ -218,7 +217,7 @@ void parse_csvzstd(ZstdDS& zbuf,
       cao.warn(std::to_string(libsize.size() - positive.size()) +
                " sample(s) have zero total counts. their normalized values are set to 0.");
     // median over non-empty samples, so empty samples do not drag the CPMED target to 0
-    if (scale == 2) median_libsize = get_median(positive);
+    if (scale == 2) median_libsize = median_inplace(positive);
   }
 }
 
@@ -331,6 +330,5 @@ PermMat shuffle_csvzstd_to_bin(std::string& fin, std::string fout, uint gb, int 
   }
   fin = fout + ".perm.bin";
   ofs2 << indices << "\n";
-  // zstd_compress_file(fin, fin+".zst", 3);
   return PermMat(indices);
 }

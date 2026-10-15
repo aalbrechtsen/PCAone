@@ -29,6 +29,7 @@
 #include "Halko.hpp"
 #include "InbredSamples.hpp"
 #include "Kinship.hpp"
+#include "TextIO.hpp"
 #include "Utils.hpp"
 
 using MatB = Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>;
@@ -799,7 +800,7 @@ void whitened_cs(const Mat2D& AM, const Mat1D& noise, const std::vector<Pair>& p
   U = Wh.apply(VV).rightCols(k);
 }
 
-void write_matrix(const std::string& fn, const Mat2D& M) {
+void write_tsv(const std::string& fn, const Mat2D& M) {
   std::ofstream ofs(fn);
   if (!ofs.is_open()) cao.error("can not open " + fn);
   Eigen::IOFormat fmt(6, Eigen::DontAlignCols, "\t", "\n");
@@ -1298,10 +1299,14 @@ static std::vector<FinalRel> final_relatedness(Data* data, const Param& params, 
 static void write_outputs(Data* data, const Param& params, Eigen::Index N, const Mat2D& U, const Mat1D& w,
                           const std::vector<Pair>& pairs, const std::function<double(int, int)>& king_of,
                           const std::vector<FinalRel>* fin_in = nullptr, const PcpIaf* pcp = nullptr) {
-  write_matrix(params.fileout + ".eigvecs", U);
-  write_matrix(params.fileout + ".eigvals", w);
+  write_tsv(params.fileout + ".eigvecs", U);
+  write_tsv(params.fileout + ".eigvals", w);
+  const SampleIds sid = read_sample_ids(params);
+  // the PCs with the FID and IID of each sample, as plink2's .eigenvec
+  if (params.file_t == FileType::PLINK || params.file_t == FileType::PGEN)
+    write_eigvecs2(params.fileout + ".eigvecs2", U, sid);
   const std::vector<FinalRel> fin = fin_in ? *fin_in : final_relatedness(data, params, U, pairs, pcp);
-  String1D ids = read_sample_ids(params);
+  const String1D& ids = sid.iid;
   std::ofstream rp(params.fileout + ".relpairs");
   // KING: KING-robust; KIN_DETECT: kinship of the detection step (decides the
   // pair and its weight); KINSHIP, K0..K2: final estimates given the final PCs;
@@ -2307,7 +2312,7 @@ static void run_dwg_operator(Data* data, const Param& params) {
     return it == king_map.end() ? NAN : it->second;
   });
   // the fitted per-individual noise (GRM scale): the whitening weight is 1 / sqrt(noise)
-  write_matrix(params.fileout + ".noise", F.v);
+  write_tsv(params.fileout + ".noise", F.v);
 }
 
 

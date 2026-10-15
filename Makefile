@@ -1,6 +1,6 @@
 ######################### configure ################
 
-VERSION=0.8.0
+VERSION=0.9.0
 # Detect OS and CPU architecture to add flags conditionally
 Platform        := $(shell uname -s)
 ARCH            := $(shell uname -m)
@@ -137,9 +137,9 @@ else
 	DLIBS    += -lz
 endif
 
-OBJ = src/Arnoldi.o src/Halko.o src/Data.o src/Utils.o src/Cmd.o \
-		src/FileBeagle.o src/FileCsv.o src/FileBgen.o src/FilePlink.o src/FilePgen.o \
-		src/FileBinary.o src/FileUSV.o src/LD.o src/Projection.o \
+OBJ = src/Arnoldi.o src/Halko.o src/Data.o src/Utils.o src/LinAlg.o src/Stats.o src/TextIO.o src/Variants.o src/Cmd.o \
+		src/FileBeagle.o src/FileCsv.o src/FileBgen.o src/BgenBlock.o src/FilePlink.o src/FilePgen.o src/PgenBlock.o \
+		src/FileBinary.o src/FileUSV.o src/LD.o src/Projection.o src/PackedScore.o src/PackedPca.o \
 		src/InbredSites.o src/InbredSamples.o src/Selection.o src/EvalAdmix.o src/Exact.o src/Kinship.o src/Robust.o \
 		src/kfunc.o
 
@@ -156,7 +156,7 @@ SLIBS += ./external/bgen/bgenlib.a ./external/zstd/lib/libzstd.a  ./external/pge
 
 LIBS += $(SLIBS) $(DLIBS) -lpthread -ldl -lm
 
-.PHONY: all clean ibd island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence test_em_snp_order test_projection_bootstrap test_cmd_guards test_crash_regressions test_review_fixes test_ref_k test_exact_streaming test_inbreed_samples test_evaladmix test_evaladmix_pairs
+.PHONY: all clean docs serve-docs ibd island projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests test_full test_aarch64 test_pgen_plink_equivalence test_em_snp_order test_projection_bootstrap test_cmd_guards test_crash_regressions test_review_fixes test_ref_k test_project_out_of_core test_exact_streaming test_inbreed_samples test_evaladmix test_evaladmix_pairs test_evaladmix_ibd test_em_k test_bgen_formats
 
 all: ${program} pcaone-ibd
 
@@ -203,6 +203,9 @@ test_review_fixes: ${program}
 test_ref_k: ${program}
 	python3 tests/test_ref_k.py
 
+test_project_out_of_core: ${program}
+	python3 tests/test_project_out_of_core.py
+
 test_exact_streaming: ${program}
 	python3 tests/test_exact_streaming.py
 
@@ -218,8 +221,17 @@ test_evaladmix: ${program}
 test_evaladmix_pairs: ${program}
 	python3 tests/test_evaladmix_pairs.py
 
+test_evaladmix_ibd: ${program}
+	python3 tests/test_evaladmix_ibd.py
+
 test_emu_simulated: ${program}
 	python3 tests/test_emu_simulated.py
+
+test_em_k: ${program}
+	python3 tests/test_em_k.py
+
+test_bgen_formats: ${program}
+	python3 tests/test_bgen_formats.py
 
 test_projection_bootstrap: zstdlib bgenlib pgenlib $(PCALIB) tests/test_projection_bootstrap.o
 	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
@@ -239,6 +251,14 @@ data:
 	wget http://popgen.dk/zilong/datahub/pca/example.tar.gz
 	tar -xzf example.tar.gz && rm -f example.tar.gz
 
+# documentation website in site/ (pip install -r docs/requirements.txt)
+docs:
+	mkdocs build --strict
+
+# live preview of the website at http://127.0.0.1:8000
+serve-docs:
+	mkdocs serve
+
 ###################################################################
 #####                   EXAMPLE TESTS
 ###################################################################
@@ -257,11 +277,14 @@ example_tests:
 	./PCAone --csv example/BrainSpinalCord.csv.zst -k 10 -m 4 --scale 2 -S
 
 projection:
-	./PCAone -b example/ref -k 3 -V -o ref -v3
+	./PCAone -b example/ref -k 3 -o ref -v3
 	./PCAone -b example/new --USV ref -k 3 --project 2 --project-bootstrap 100 -o new -v3
+	./PCAone -b example/new --USV ref -k 3 --project 2 --project-bootstrap 100 -o new_m -m 0.2 -v3
+	diff new.eigvecs new_m.eigvecs
+	diff new.proj.bootstrap.tsv new_m.proj.bootstrap.tsv
 
 hwe:
-	./PCAone -b example/plink -k 3 -V -m 1
+	./PCAone -b example/plink -k 3 -m 1
 	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 1 -o m0
 	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 1 -o m1 -m 1
 	./PCAone -b example/plink --USV pcaone -k 3 --inbreed 2 -o m0
@@ -272,8 +295,8 @@ hwe:
 # The LD analyses read the genotypes and remove the PCs of -P/--USV as they go.
 # ld_matrix makes those PCs, and checks the .mbim order in-core and out-of-core.
 ld_matrix:
-	./PCAone -b example/plink -k 3 -V -o adj -d 2
-	./PCAone -b example/plink -k 3 -V -o pcaone -d 2 -m 1
+	./PCAone -b example/plink -k 3 -o adj -d 2
+	./PCAone -b example/plink -k 3 -o pcaone -d 2 -m 1
 	diff adj.mbim pcaone.mbim
 	cut -f1 adj.mbim | sort -cn  ## check if sorted
 	awk '$$1==3' adj.mbim | cut -f4 | sort -cn
@@ -349,12 +372,39 @@ example_tests_fast:
 	diff m0.eigvals m1.eigvals
 
 # The fast test suite for aarch64
-test_aarch64: test_cmd_guards test_bed_permutation data example_tests_fast hwe ld_matrix ld_r2 ld_prune ld_clump
+test_aarch64: test_cmd_guards test_bed_permutation test_prefetch data example_tests_fast hwe ld_matrix ld_r2 ld_prune ld_clump
 	@echo "SUCCESS: aarch64 fast test suite completed."
 
 # The complete test suite for other architectures like x86_64
-test_full: test_cmd_guards test_bed_permutation data example_tests projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests
+test_full: test_cmd_guards test_bed_permutation test_prefetch data example_tests projection hwe ld_matrix ld_r2 ld_prune ld_clump ld_tests
 	@echo "SUCCESS: Full test suite completed."
+
+.PHONY: test_prefetch test_mul_x_y test_pgen_block test_textio test_packed_pca
+test_prefetch: ${program} test_mul_x_y test_pgen_block test_textio test_packed_pca
+	$(CXX) -std=c++17 -Wall -Wextra -pthread tests/test_prefetch.cpp -o tests/test_prefetch
+	./tests/test_prefetch
+	python3 tests/test_prefetch.py
+
+# the number formatting and the parallel writer of every text output, against
+# printf and Eigen's own output
+test_textio: zstdlib bgenlib pgenlib $(PCALIB) tests/test_textio.o
+	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
+	./tests/$@
+
+# the row-panel product of the RSVD, H = X * G and H += X * G
+test_mul_x_y: zstdlib bgenlib pgenlib $(PCALIB) tests/test_mul_x_y.o
+	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
+	./tests/$@
+
+# the products of the in-core RSVD on the 2-bit calls of a BED
+test_packed_pca: zstdlib bgenlib pgenlib $(PCALIB) tests/test_packed_pca.o
+	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o $(PCALIB) $(LPATHS) $(LIBS) $(LDFLAGS)
+	./tests/$@
+
+# pgenlib's readers of out-of-core PGEN runs, and their cleanup when set-up fails
+test_pgen_block: pgenlib src/PgenBlock.o tests/test_pgen_block.o
+	$(CXX) $(CXXFLAGS) -o tests/$@ tests/$@.o src/PgenBlock.o $(LPATHS) $(LIBS) $(LDFLAGS)
+	./tests/$@
 
 .PHONY: test_bed_permutation
 test_bed_permutation: ${program}

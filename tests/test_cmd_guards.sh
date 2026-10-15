@@ -51,6 +51,14 @@ bad "--tol-em" -b x --tol-em -1
 bad "--tol-maf" -b x --tol-maf 0
 bad "--emu cannot be used" -b x --emu --pcangsd
 bad "--emu cannot be used" -G x --emu
+bad "--em-k requires EM-PCA" -b x --em-k 2
+bad "--em-k requires EM-PCA" -p x -k 3 --em-k 2
+bad "--em-k must be at least 1" -G x --em-k 0
+bad "--em-k must be at least 1" -b x --pcangsd --em-k 0
+bad "--em-k: '-1'" -b x --emu --em-k -1
+bad "--em-k must be at least 1" -b x --emu --em-k 0
+bad "--ncv must be greater than --em-k" -b x --emu -k 2 --em-k 10 --ncv 8
+bad "--ncv must be greater than -k/--pc" -b x --emu -k 10 --em-k 2 --ncv 8
 bad "--maf" -b x --maf -0.1
 bad "--maf" -b x --maf 0.5
 bad "--project" -b x --project -1
@@ -68,10 +76,15 @@ bad "--evaladmix-kin requires --evaladmix" -b x -P ref --evaladmix-kin 0.1
 bad "--evaladmix-unrelated requires --evaladmix-kin" -b x -P ref --evaladmix --evaladmix-unrelated 0.1
 bad "kinship cutoff, in [-0.5, 0.5]" -b x -P ref --evaladmix --evaladmix-kin 0.6
 bad "has to be in [--evaladmix-kin, 0.5]" -b x -P ref --evaladmix --evaladmix-kin 0.1 --evaladmix-unrelated 0.05
+bad "--evaladmix-ibd requires --evaladmix" -b x -P ref --evaladmix-ibd
 bad "--ld-r2" -b x --ld-r2 1.5
 bad "--ld-r2" -b x --ld-r2 -0.2
 bad "--ld-bp" -b x --ld-bp 0
 bad "--ld-stats" -b x --ld-stats 2
+# removed in v0.8.0: the loadings are written by default
+bad "-V/--printv was removed" -b x -V
+bad "-V/--printv was removed" -b x --printv
+bad "-V/--printv was removed" -b x -V --no-loadings
 bad "--clump-p1 cannot" -b x --clump-p1 0.05 --clump-p2 0.01
 bad "--clump-p1" -b x --clump-p1 0
 bad "--clump-p2" -b x --clump-p2 1.5
@@ -88,6 +101,7 @@ bad "--emu with --bgen" -g x --emu -m 1
 bad "--project supports only" -g x -P p --project 1
 bad "--project supports only" -c x -P p --project 1
 bad "--project 3 requires" -b x -P p --project 3
+bad "-m (out-of-core) supports --project 1 and 2" -G x -P p --project 3 -m 1
 bad "--evaladmix supports only" -g x --evaladmix
 bad "--evaladmix supports only" -c x --evaladmix
 bad "--inbreed supports only" -g x -P p --inbreed 1

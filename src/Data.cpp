@@ -10,7 +10,10 @@
 
 #include "Cmd.hpp"
 #include "Kinship.hpp"
+#include "LinAlg.hpp"
+#include "TextIO.hpp"
 #include "Utils.hpp"
+#include "Variants.hpp"
 
 using namespace std;
 
@@ -41,12 +44,23 @@ void Data::prepare() {
     return;
   }
 
+  if (params.project > 0) {
+    // out-of-core --project 1/2 reads only the sites matched to the reference,
+    // in .bim/.pvar order (keepSNPs; all of them when identical), and sizes its
+    // blocks itself from -m, K and N (run_projection_blockwise -> set_blocks)
+    if (!keepSNPs.empty()) {
+      nsnps_all = nsnps;
+      nsnps = keepSNPs.size();
+    }
+    return;
+  }
+
   // LD and evalAdmix keep dopca on to estimate F, but run no PCA.
   // Size their blocks like any other non-PCA run.
   const bool pca_blocks = params.dopca && !params.ld && !params.evaladmix;
   const bool exact = pca_blocks && params.svd_t == SvdType::FULL;
   if (exact) {
-    // exact PCA (Exact.cpp): the N x N GRM and F, plus the loadings for -V,
+    // exact PCA (Exact.cpp): the N x N GRM and F, plus the loadings unless --no-loadings,
     // are held besides one block. Without -m, blocks of ~64 MB (and at least
     // 2048 sites) keep the GRM update a large matrix product.
     const double n = std::max(1u, nsamples);
@@ -67,7 +81,8 @@ void Data::prepare() {
     } else {
       // ram of halko = (3*n*l + 2*m*l + 5*m + n*b)*8/1024 Kb
       // in doubles: the unsigned products wrapped once nsnps * l reached 2^31
-      const double l = (double)params.k + params.oversamples;
+      // the RSVD of the EM iterations (--em-k) and of the final matrix (-k) run one at a time
+      const double l = std::max((double)params.k + params.oversamples, (double)params.em_k + params.em_oversamples);
       const double fixed = 3.0 * nsamples * l + 2.0 * nsnps * l + 5.0 * nsnps;  // doubles held besides the block
       double m = fixed / 134217728;
       if (params.memory > 1.1 * m)
@@ -83,6 +98,14 @@ void Data::prepare() {
     // room from the stripes, i.e. add passes over the genotypes.
     const double b = 0.2 * params.memory * 134217728 / std::max(1u, nsamples);
     blocksize = (uint)std::min<double>(std::max(1u, nsnps), std::max(256.0, std::min(2048.0, std::floor(b))));
+  } else if (params.inbreed) {
+    // --inbreed (InbredSites.cpp, InbredSamples.cpp) holds a block of the target
+    // and the matching block of individual allele frequencies (N rows) at once.
+    // The target is N rows of genotypes, or 2N rows of likelihoods for BEAGLE, so
+    // -m is split over 2 or 3 such N-row blocks. Both Data objects size their
+    // blocks here, alike.
+    const double parts = params.file_t == FileType::BEAGLE ? 3.0 : 2.0;
+    blocksize = (uint)ceil((double)params.memory / parts * 134217728 / nsamples);
   } else {
     // ram of non-pca run
     blocksize = (uint)ceil((double)params.memory * 134217728 / nsamples);
@@ -118,6 +141,17 @@ void Data::prepare() {
   }
 }
 
+void Data::set_blocks(uint b) {
+  blocksize = std::max(1u, std::min(b, std::max(1u, nsnps)));
+  nblocks = (nsnps + blocksize - 1) / blocksize;
+  start.resize(nblocks);
+  stop.resize(nblocks);
+  for (uint i = 0; i < nblocks; i++) {
+    start[i] = i * blocksize;
+    stop[i] = std::min<uint64>((uint64)start[i] + blocksize, nsnps) - 1;
+  }
+}
+
 // filter snps, update keepSNPs, reassign nsnps;
 void Data::filter_snps_resize_F() {
   if (!params.filterSNP) return;
@@ -139,69 +173,121 @@ void Data::filter_snps_resize_F() {
   F.noalias() = Fnew.head(nsnps);
 }
 
-// initially only works with plink inputs
-// but can work with beagle file as long as there is beagle.gz.bim file
-// TODO: always output mbim even though there is no beagle.gz.bim file
+// The variants of the .bim/.pvar, each with its allele frequency, in the order
+// of the input; not written for CSV and BEAGLE, which have no .bim
 void Data::save_snps_in_mbim() {
-  const bool has_metadata_header = params.file_t == FileType::PGEN;
-  const std::string bim_path = params.filein + (has_metadata_header ? ".pvar" : ".bim");
+  const bool pvar = params.file_t == FileType::PGEN;
+  const std::string bim_path = params.filein + (pvar ? ".pvar" : ".bim");
   std::ifstream ifs_bim(bim_path);
   if (!ifs_bim.is_open()) {
-    cao.warn(params.filein + ".bim/.pvar not found; skipping mbim output");
+    // CSV has no variant metadata; now that .loadings are written by default,
+    // warning on every CSV run would be noise
+    if (params.file_t != FileType::CSV) cao.warn(params.filein + ".bim/.pvar not found; skipping mbim output");
     return;
   }
-  std::ofstream ofs_bim(params.fileout + ".mbim");
-  std::string line;
-  auto read_metadata_line = [&]() {
-    while (getline(ifs_bim, line)) {
-      if (has_metadata_header && !line.empty() && line[0] == '#') continue;
-      if (has_metadata_header) line = pvar_line_to_bim_line(line, bim_path);
-      return true;
-    }
-    return false;
+  const std::string fout = params.fileout + ".mbim";
+  std::ofstream ofs_bim(fout, std::ios::binary);
+  if (!ofs_bim.is_open()) cao.error("can not open file for writing: " + fout);
+  // a line of the .mbim: the .bim line and the frequency
+  auto put_line = [](TextBuf& buf, const std::string& meta, double f) {
+    buf.append(meta);
+    char* p = buf.reserve(TEXT_NUM_MAX + 2);
+    *p++ = '\t';
+    p = put_g6(f, p);
+    *p++ = '\n';
+    buf.commit(p);
   };
-  const bool metadata_is_permuted =
-      params.file_t == FileType::PLINK && params.perm && params.out_of_core && perm.indices().size() == nsnps &&
-      !logical_bed_perm;
+  std::string line;
+  const bool metadata_is_permuted = metadata_permuted && perm.indices().size() == nsnps;
   const bool frequency_is_permuted = params.perm && params.out_of_core && perm.indices().size() == nsnps;
 
-  if (!params.filterSNP && !params.perm) {
-    for (Eigen::Index j = 0; j < F.size() && read_metadata_line(); ++j) {
-      ofs_bim << line << "\t" << F(j) << "\n";
-    }
-    ofs_bim.close();
-    return;
-  }
-
-  std::vector<std::string> metadata(nsnps);
-  if (metadata_is_permuted) {
-    for (Eigen::Index permuted_idx = 0; permuted_idx < nsnps && read_metadata_line(); ++permuted_idx) {
-      Eigen::Index original_idx = perm.indices()[permuted_idx];
-      metadata[original_idx] = line;
-    }
-  } else if (params.filterSNP) {
-    int kept = 0;
-    for (int source_idx = 0; kept < (int)nsnps && read_metadata_line(); ++source_idx) {
-      if (kept < (int)keepSNPs.size() && keepSNPs[kept] == source_idx) {
-        metadata[kept++] = line;
-      }
-    }
-  } else {
-    for (Eigen::Index j = 0; j < nsnps && read_metadata_line(); ++j) {
-      metadata[j] = line;
-    }
-  }
-
+  // the logical site whose frequency goes with each line
   std::vector<Eigen::Index> original_to_logical(nsnps);
   for (Eigen::Index logical_idx = 0; logical_idx < nsnps; ++logical_idx) {
     Eigen::Index original_idx = frequency_is_permuted ? perm.indices()[logical_idx] : logical_idx;
     original_to_logical[original_idx] = logical_idx;
   }
 
-  for (Eigen::Index original_idx = 0; original_idx < nsnps; ++original_idx) {
-    ofs_bim << metadata[original_idx] << "\t" << F(original_to_logical[original_idx]) << "\n";
+  if (!pvar) {
+    // the .bim at once, its lines found in the buffer, and the .mbim written
+    // from it on every thread: reading it a line at a time into strings took
+    // as long as an epoch of the winSVD
+    ifs_bim.seekg(0, std::ios::end);
+    std::string text((size_t)ifs_bim.tellg(), '\0');
+    ifs_bim.seekg(0);
+    ifs_bim.read(text.data(), (std::streamsize)text.size());
+    if (!ifs_bim) cao.error("cannot read " + bim_path);
+    std::vector<size_t> start{0};  // the lines as std::getline splits them
+    for (const char *p = text.data(), *e = p + text.size(); (p = (const char*)std::memchr(p, '\n', e - p)); ++p)
+      start.push_back((size_t)(p - text.data()) + 1);
+    if (start.back() < text.size()) start.push_back(text.size() + 1);  // a last line without '\n'
+    const Eigen::Index nlines = (Eigen::Index)start.size() - 1;
+    // the source line of each site, by the order the metadata was read in
+    std::vector<Eigen::Index> src(nsnps, -1);
+    for (Eigen::Index j = 0; j < nsnps; ++j) {
+      Eigen::Index s = j;
+      if (metadata_is_permuted) {
+        src[perm.indices()[j]] = j;
+        continue;
+      }
+      if (params.filterSNP) s = keepSNPs[j];
+      src[j] = s;
+    }
+    // with the streamed read, only as many lines as F has
+    const Eigen::Index nout =
+        (!params.filterSNP && !params.perm) ? std::min<Eigen::Index>(nsnps, nlines) : (Eigen::Index)nsnps;
+    write_lines(ofs_bim, nout, 64, [&](Eigen::Index i, TextBuf& buf) {
+      const Eigen::Index s = src[i];
+      if (s >= 0 && s < nlines) buf.append(text.data() + start[s], start[s + 1] - 1 - start[s]);
+      char* p = buf.reserve(TEXT_NUM_MAX + 2);
+      *p++ = '\t';
+      p = put_g6(F(original_to_logical[i]), p);
+      *p++ = '\n';
+      buf.commit(p);
+    });
+    ofs_bim.close();
+    if (!ofs_bim) cao.error("error writing " + fout);
+    if (params.filterSNP || params.perm)
+      cao.print(tick.date(), "save matched sites in .mbim file and permutation mode is", params.perm);
+    return;
   }
+
+  if (!params.filterSNP && !params.perm) {  // the variants are in the order of F: stream them
+    TextBuf buf;
+    for (Eigen::Index j = 0; j < F.size() && read_bim_line(ifs_bim, pvar, bim_path, line); ++j) {
+      put_line(buf, line, F(j));
+      if (buf.size() >= (size_t(32) << 20)) buf.write_to(ofs_bim), buf.clear();
+    }
+    buf.write_to(ofs_bim);
+    ofs_bim.close();
+    if (!ofs_bim) cao.error("error writing " + fout);
+    return;
+  }
+
+  std::vector<std::string> metadata(nsnps);
+  if (metadata_is_permuted) {
+    for (Eigen::Index permuted_idx = 0; permuted_idx < nsnps && read_bim_line(ifs_bim, pvar, bim_path, line);
+         ++permuted_idx) {
+      Eigen::Index original_idx = perm.indices()[permuted_idx];
+      metadata[original_idx] = line;
+    }
+  } else if (params.filterSNP) {
+    int kept = 0;
+    for (int source_idx = 0; kept < (int)nsnps && read_bim_line(ifs_bim, pvar, bim_path, line); ++source_idx) {
+      if (kept < (int)keepSNPs.size() && keepSNPs[kept] == source_idx) {
+        metadata[kept++] = line;
+      }
+    }
+  } else {
+    for (Eigen::Index j = 0; j < nsnps && read_bim_line(ifs_bim, pvar, bim_path, line); ++j) {
+      metadata[j] = line;
+    }
+  }
+
+  write_lines(ofs_bim, nsnps, 64,
+              [&](Eigen::Index i, TextBuf& buf) { put_line(buf, metadata[i], F(original_to_logical[i])); });
   ofs_bim.close();
+  if (!ofs_bim) cao.error("error writing " + fout);
   cao.print(tick.date(), "save matched sites in .mbim file and permutation mode is", params.perm);
 }
 
@@ -232,7 +318,8 @@ void Data::calcu_vt_initial(const Mat2D& T, Mat2D& VT, bool standardize) {
   return;
 }
 
-void Data::calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, Mat2D& VT, bool standardize) {
+void Data::calcu_vt_update(
+    const Mat2D& T, const Mat2D& U, const Mat1D& svals, const Mat2D& VT, Mat2D& VTout, bool standardize) {
   if (nblocks == 1) {
     cao.error("only one block exists. please use in-memory mode instead");
   }
@@ -243,7 +330,7 @@ void Data::calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, M
     // G (nsamples, actual_block_size)
     read_block_update(start[i], stop[i], U, svals, VT, standardize);
     whiten_G();
-    VT.block(0, start[i], T.rows(), actual_block_size) = T * G.leftCols(actual_block_size);
+    VTout.block(0, start[i], T.rows(), actual_block_size) = T * G.leftCols(actual_block_size);
   }
 
   return;
@@ -263,46 +350,59 @@ void Data::set_svd_transform(bool standardized) {
 }
 
 void Data::write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, const Mat2D& V) {
-  std::ofstream outs(params.fileout + ".sigvals");
-  std::ofstream oute(params.fileout + ".eigvals");
-  std::ofstream outu(params.fileout + ".eigvecs");
-  Eigen::IOFormat fmt(6, Eigen::DontAlignCols, "\t", "\n");
+  // key=value fields are appended after nsamples,nsnps; older PCAone parses
+  // the first two with stoi and ignores the rest. See UsvTransform.
+  const std::string sig = "#" + std::to_string(U.rows()) + "," + std::to_string(V.rows()) +
+                          ",scale=" + std::to_string(svd_scale) + ",ploidy=" + std::to_string(params.ploidy) +
+                          ",gscale=" + std::to_string(svd_gscale) + "\n";
+  write_matrix(params.fileout + ".sigvals", S, {}, sig);
+  write_matrix(params.fileout + ".eigvals", E);
+  // --kinship: ancestry scores are Sigma^{1/2} U~, i.e. the unwhitened
+  // genotypes projected onto the loadings of the whitened data
+  Mat2D Uw = U;
   if (whitener) {
-    // ancestry scores are Sigma^{1/2} U~, i.e. the unwhitened genotypes
-    // projected onto the loadings of the whitened data
-    Mat2D Uw = U;
     whitener->unwhiten(Uw);
-    if (outu.is_open()) outu << Uw.format(fmt) << '\n';
     cao.print(tick.date(), "kinship-whitened PCA: scores mapped back by Sigma^{1/2}");
-  } else if (outu.is_open()) {
-    outu << U.format(fmt) << '\n';
   }
-  if (outs.is_open()) {
-    // key=value fields are appended after nsamples,nsnps; older PCAone parses
-    // the first two with stoi and ignores the rest. See UsvTransform.
-    outs << '#' << U.rows() << ',' << V.rows() << ",scale=" << svd_scale << ",ploidy=" << params.ploidy
-         << ",gscale=" << svd_gscale << '\n';
-    outs << S.format(fmt) << '\n';
-  }
-  if (oute.is_open()) oute << E.format(fmt) << '\n';
+  write_matrix(params.fileout + ".eigvecs", Uw);
+  // the PCs again, with the FID and IID of each sample, as plink2's .eigenvec
+  if (params.file_t == FileType::PLINK || params.file_t == FileType::PGEN)
+    write_eigvecs2(params.fileout + ".eigvecs2", Uw, read_sample_ids(params));
   if (params.printv) {
     save_snps_in_mbim();
-    std::ofstream outv(params.fileout + ".loadings");
-    if (!outv.is_open()) cao.error("can not open " + params.fileout + ".loadings");
+    // the loadings of a shuffled run are put back in the order of the input
+    std::vector<Eigen::Index> order;
     if (params.perm && V.rows() == nsnps && perm.indices().size() == nsnps) {
-      std::vector<Eigen::Index> original_to_logical(nsnps);
-      for (Eigen::Index logical_idx = 0; logical_idx < nsnps; ++logical_idx) {
-        original_to_logical[perm.indices()[logical_idx]] = logical_idx;
-      }
-      for (Eigen::Index original_idx = 0; original_idx < V.rows(); ++original_idx) {
-        outv << V.row(original_to_logical[original_idx]).format(fmt) << '\n';
-      }
-    } else {
-      outv << V.format(fmt) << '\n';
+      order.resize(nsnps);
+      for (Eigen::Index logical_idx = 0; logical_idx < nsnps; ++logical_idx)
+        order[perm.indices()[logical_idx]] = logical_idx;
     }
+    write_matrix(params.fileout + ".loadings", V, {}, "", order.empty() ? nullptr : &order);
   }
 
   cao.print(tick.date(), "eigen vectors and values saved");
+}
+
+void Data::write_pcangsd_cov() const {
+  Mat2D C = G * G.transpose();
+  C.array() /= (double)nsnps;
+  C.diagonal() = Dc.array() / (double)nsnps;
+  TextFormat fmt;  // Eigen's default `os << C`, as it has always been written
+  fmt.sep = ' ';
+  fmt.align = true;
+  write_matrix(params.fileout + ".cov", C, fmt);
+  // C is symmetric: its eigenvectors are its singular vectors. JacobiSVD took
+  // 21 s at N = 1000 and 215 s at N = 1500; this takes 0.7 s and 2.5 s.
+  Eigen::SelfAdjointEigenSolver<Mat2D> es(C);
+  if (es.info() != Eigen::Success) cao.error("failed eigendecomposition of the PCAngsd covariance matrix");
+  const Eigen::Index k = std::min<Eigen::Index>(params.k, C.rows());
+  Mat2D U = es.eigenvectors().rightCols(k).rowwise().reverse();  // largest first
+  for (Eigen::Index j = 0; j < k; ++j) {                         // same sign rule as flip_UV
+    Eigen::Index x;
+    U.col(j).cwiseAbs().maxCoeff(&x);
+    if (U(x, j) < 0) U.col(j) *= -1;
+  }
+  write_eigvecs2(params.fileout + ".eigvecs2", U, read_sample_ids(params));
 }
 
 void Data::fit_with_pi(const Mat2D& U, const Mat1D& svals, const Mat2D& VT) {
@@ -348,6 +448,35 @@ void Data::fit_with_pi(const Mat2D& U, const Mat1D& svals, const Mat2D& VT) {
   }
 }
 
+bool Data::packed_pca() const {
+  return params.file_t == FileType::PLINK && params.dopca && !params.nopacked &&
+         (params.svd_t == SvdType::PCAoneAlg1 || params.svd_t == SvdType::PCAoneAlg2) && !params.missme &&
+         !params.pcangsd && params.center && !params.ld && !params.evaladmix && params.project == 0 &&
+         params.selection == 0 && params.inbreed == 0 && params.filekin.empty() && params.robust.empty() &&
+         (params.scale == SCALE_STANDARDIZE_GENETIC || params.scale == 0);
+}
+
+void Data::set_packed_sites(bool standardize, uint64 j0, uint64 n) {
+  if (!packed) {  // out-of-core: the records come with each block
+    const PackedCoding coding = packed_coding();
+    packed = std::make_unique<PCAone::PackedGenotypes>(nullptr, nsamples, nsnps, coding.value, coding.missing);
+  }
+  if (n == (uint64)-1) n = nsnps - j0;
+  Mat1D a(n), b(n);
+#pragma omp parallel for
+  for (uint64 i = 0; i < n; ++i) {
+    const uint64 j = j0 + i;
+    const double f = F(unpermuted_snp_index(j));
+    double s = 1.0;
+    if (standardize && params.scale == SCALE_STANDARDIZE_GENETIC) {
+      const double sd = sqrt(f * (1.0 - f));
+      if (sd > VAR_TOL) s = sqrt((double)params.ploidy) / sd;
+    }
+    a(i) = -s * f, b(i) = s;
+  }
+  packed->set_sites(j0, a, b, Mat1D::Zero(n));
+}
+
 void Data::standardize_E() {
   if (params.verbose >= 3) cao.print(tick.date(), "standardize the matrix");
   if (params.scale != -9) return;
@@ -378,8 +507,7 @@ bool Data::resolve_ref_scaling(const UsvTransform& t, const std::string& src, bo
     return params.scale == SCALE_STANDARDIZE_GENETIC;
   }
   if (t.scale > 0)
-    cao.error("the reference PCA used -C/--scale ", t.scale,
-              ", which cannot be replayed on the target genotypes here");
+    cao.error("the reference PCA used -C/--scale ", t.scale, ", which cannot be replayed on the target genotypes here");
   if (t.gscale != 1 && !(allow_dosage && t.gscale == 2))
     cao.error("the reference PCA decomposed dosages on the 0..2 scale (gscale=", t.gscale,
               "), which is not the 0..1 coding used here. this combination was silently mis-scaled before; "
@@ -387,8 +515,9 @@ bool Data::resolve_ref_scaling(const UsvTransform& t, const std::string& src, bo
   // mirrors FileUSV::check_transform(): standardize_E() and
   // pcangsd_standardize_E() disagree on what this matrix is, so it has no inverse
   if (t.gscale == 2 && t.scale == SCALE_STANDARDIZE_GENETIC)
-    cao.error("the reference PCA standardised a dosage-scale matrix (gscale=2, scale=-9), which cannot be "
-              "replayed on the target here. rerun the reference PCA so it decomposes centred dosages");
+    cao.error(
+        "the reference PCA standardised a dosage-scale matrix (gscale=2, scale=-9), which cannot be "
+        "replayed on the target here. rerun the reference PCA so it decomposes centred dosages");
   if (t.ploidy != params.ploidy)
     cao.error("the reference PCA used ploidy ", t.ploidy, " but this run uses ", params.ploidy,
               "; pass --haploid consistently");

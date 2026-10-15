@@ -26,9 +26,6 @@
  * eigendecomposed on its own. Applying L to an N x b block costs
  * O(sum_f n_f^2 * b), negligible next to the SVD.
  */
-/// IID of every sample, from the .fam / .psam (empty for other inputs)
-String1D read_sample_ids(const Param& params);
-
 /// pairs (i, j, phi), i < j, with kinship >= kmin from --kinship (pair table or N x N matrix)
 std::vector<std::tuple<int, int, double>> read_kinship_pairs(const Param& params, uint N, double kmin);
 

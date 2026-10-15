@@ -1,11 +1,12 @@
 #ifndef PCAONE_FILEPLINK_
 #define PCAONE_FILEPLINK_
 
-#include "BedWindow.hpp"
-#include "Data.hpp"
-#include "Utils.hpp"
-
+#include <limits>
 #include <memory>
+
+#include "Data.hpp"
+#include "Prefetch.hpp"
+#include "Utils.hpp"
 
 class FileBed : public Data {
  public:
@@ -20,8 +21,10 @@ class FileBed : public Data {
     cao.print(tick.date(), "N (# samples):", nsamples, ", M (# SNPs):", nsnps);
     if (!nsamples || !nsnps) cao.error("BED input must contain at least one sample and one SNP.");
     snpmajor = true;
+    bed_nrecords = nsnps;
     bed_bytes_per_snp = (nsamples + 3) >> 2;
     std::string fbed = params.filein + ".bed";
+    bed_path = fbed;
     bed_ifstream.open(fbed, std::ios::in | std::ios::binary);
     if (!bed_ifstream.is_open()) cao.error("Cannot open bed file.");
     // check magic number of bed file
@@ -36,13 +39,12 @@ class FileBed : public Data {
   ~FileBed() override;
 
   void read_all() final;
+  void read_all_packed();
   // Called after prepare(), before any genotype reads or frequency estimates.
-  void apply_permutation(Param& config);
-  // Alternative to apply_permutation(): band b of the -w bands holds the SNPs
-  // b, b+W, b+2W, ... in source order, read straight from the input BED through
-  // a window of whole bands held in --perm-mem GiB. No permuted copy is written.
-  // Called after prepare(); realigns the blocks so each band is one interleave set.
-  void apply_logical_permutation(const Param& config);
+  // Shuffles the SNPs for out-of-core winSVD. By default the blocks read the
+  // shuffled SNPs from the input; with --bed-copy they are written to
+  // <out>.perm.*, which replaces the input. Returns true if it wrote the copy.
+  bool apply_permutation(Param& config);
   // for blockwise
   void check_file_offset_first_var() final;
 
@@ -50,19 +52,41 @@ class FileBed : public Data {
 
   void read_block_update(uint64, uint64, const Mat2D&, const Mat1D&, const Mat2D&, bool) final;
 
+  bool packed_calls() final { return params.center; }
+  const uint8_t* read_block_packed(uint64 start_idx, uint64 stop_idx) final;
+  PackedCoding packed_coding() const final {
+    return {{BED2GENO[0], std::numeric_limits<double>::quiet_NaN(), BED2GENO[2], BED2GENO[3]}, 1};
+  }
+
  private:
   std::ifstream bed_ifstream;
   uint64 bed_bytes_per_snp;
+  uint64 bed_nrecords = 0;  // SNPs in the BED, whatever nsnps a projection keeps
   bool frequency_was_estimated = false;
   uint64 nmono_seen = 0;  // sites with MAF=0 met while estimating F block by block
   std::vector<uchar> inbed;
-  std::unique_ptr<PCAone::BedWindowReader> window_reader;  // set by apply_logical_permutation()
-  // fill inbed with the records of SNPs [start_idx, start_idx + count)
-  void read_records(uint64 start_idx, uint64 count);
+  std::string bed_path;  // the BED read by the blocks: the input, or its permuted copy
+  // the source SNP of each logical SNP, when the blocks read them from the input
+  std::vector<uint32_t> bed_order;
+  // out-of-core: reads the next block while the current one is used (--no-prefetch: off)
+  std::unique_ptr<PCAone::RecordPrefetcher> prefetcher;
+  // the packed records of SNPs [start_idx, start_idx + count), valid until the next call
+  const uchar* read_records(uint64 start_idx, uint64 count);
+  // out-of-core with the allele frequencies of a reference (!params.dopca):
+  // read only the SNPs of keepSNPs, and centre with F
+  void use_reference_af();
 };
 
 // Shuffles the SNPs into random buckets of `bucket` SNPs, source order kept
 // within each, and writes <fout>.perm.{bed,bim,fam}. fin becomes <fout>.perm.
 PermMat permute_plink(std::string& fin, const std::string& fout, uint gb, uint64 bucket, int seed);
+
+// The order permute_plink() writes, without writing it: the SNPs shuffled at
+// random (--seed) into buckets of `bucket` SNPs, each in source order.
+std::vector<uint32_t> bed_bucket_order(uint64 nsnps, uint64 bucket, int seed);
+
+// 1 if the file is on a rotating disk, 0 if not, -1 if unknown (not Linux, or
+// a network or virtual file system)
+int on_rotating_disk(const std::string& path);
 
 #endif  // PCAONE_FILEPLINK_

@@ -5,11 +5,19 @@
 
 #include "Cmd.hpp"
 #include "Common.hpp"
-#include "Utils.hpp"  // UsvTransform
+#include "PackedPca.hpp"
+#include "TextIO.hpp"  // UsvTransform
+#include "Utils.hpp"
 
 const double VAR_TOL = 1e-9;
 
 class KinshipWhitener;
+// the 2-bit codes of read_block_packed(): the allele frequency (0..1) each
+// stands for, and the code of a missing call
+struct PackedCoding {
+  double value[4];
+  int missing;
+};
 
 class Data {
  public:
@@ -22,25 +30,50 @@ class Data {
   // for blockwise
   virtual void check_file_offset_first_var() = 0;
   virtual void read_block_initial(uint64 start_idx, uint64 stop_idx, bool standardize) = 0;
-  virtual void read_block_update(uint64 start, uint64 stop, const Mat2D& U, const Mat1D& svals, const Mat2D& VT, bool standardize) = 0;
+  virtual void read_block_update(
+      uint64 start, uint64 stop, const Mat2D& U, const Mat1D& svals, const Mat2D& VT, bool standardize) = 0;
+
+  // out-of-core --project: the 2-bit calls of the sites [start_idx, stop_idx],
+  // a record of (nsamples + 3) / 4 bytes each, 4 samples a byte, the first in
+  // the low bits, valid until the next read. The caller centres and scales
+  // them, by packed_coding() and F. Only if packed_calls(), else the blocks are
+  // read by read_block_initial().
+  virtual bool packed_calls() { return false; }
+  virtual const uint8_t* read_block_packed(uint64 start_idx, uint64 stop_idx) { return nullptr; }
+  virtual PackedCoding packed_coding() const { return {}; }
 
   void prepare();
+  // blocks of b sites over the nsnps sites, for a caller that sizes its own
+  // blocks: out-of-core --project (run_projection_blockwise)
+  void set_blocks(uint b);
   // one warning for all sites with MAF=0. The readers count them inside their
   // OpenMP loops and call this afterwards, because cao is not thread-safe.
   void warn_monomorphic(uint64 n) const {
     if (params.maf == 0 && n > 0) cao.warn(std::to_string(n) + " sites with MAF=0 found! remove them first!");
   }
   void standardize_E();
+  // whether the RSVD of this run works on the 2-bit calls (packed): a PCA by
+  // --svd 1 or 2 of a BED, centred, and standardized or not, with no EM and no
+  // --no-packed. In-core, read_all() keeps them; out-of-core, the blocks are
+  // read by read_block_packed().
+  bool packed_pca() const;
+  // the centring and scaling of the sites [j0, j0 + n) of packed (all from j0
+  // by default), as read_all() and standardize_E() give G, with the missing
+  // calls at the mean. Out-of-core, packed is made here, without records.
+  void set_packed_sites(bool standardize, uint64 j0 = 0, uint64 n = (uint64)-1);
   void filter_snps_resize_F();  // filter first, then update nsnps
   void save_snps_in_mbim();
   void pcangsd_standardize_E(const Mat2D& U, const Mat1D& svals, const Mat2D& VT);
   void fit_with_pi(const Mat2D& U, const Mat1D& svals, const Mat2D& VT);
   // In-core winSVD keeps G and V in shuffled order, but F and C retain
   // filtered input order. P additionally needs the keepSNPs mapping.
-  uint unpermuted_snp_index(uint j) const {
-    return in_core_permuted ? static_cast<uint>(perm.indices()(j)) : j;
-  }
+  uint unpermuted_snp_index(uint j) const { return in_core_permuted ? static_cast<uint>(perm.indices()(j)) : j; }
+  // .sigvals, .eigvals, .eigvecs, .eigvecs2 (PLINK, PGEN) and, unless
+  // --no-loadings, .loadings and .mbim
   void write_eigs_files(const Mat1D& E, const Mat1D& S, const Mat2D& U, const Mat2D& V);
+  // .cov and .eigvecs2 of the PCAngsd path: the covariance of the standardized
+  // expected genotypes G with its corrected diagonal Dc, and its top -k eigenvectors
+  void write_pcangsd_cov() const;
   // Record how the matrix that was just decomposed relates to the 0..1
   // allele-frequency scale, so write_eigs_files() can put it in .sigvals and
   // -P/--USV can invert U*S*V' later. Call right before write_eigs_files(),
@@ -60,7 +93,10 @@ class Data {
   // for blockwise
   // void fit_with_pi_block(const Mat2D& U, const Mat1D& svals, const Mat2D& VT);
   void calcu_vt_initial(const Mat2D& T, Mat2D& VT, bool standardize);
-  void calcu_vt_update(const Mat2D& T, const Mat2D& U, const Mat1D& svals, Mat2D& VT, bool standardize);
+  // VTout = T * G, where G is imputed from U, svals and VT as it is read. VTout
+  // may be VT itself: each block of VT is read before it is overwritten.
+  void calcu_vt_update(
+      const Mat2D& T, const Mat2D& U, const Mat1D& svals, const Mat2D& VT, Mat2D& VTout, bool standardize);
   // given PCs, predict the missing values, then update in place by block
   void predict_missing_E(const Mat2D& U, uint64 start_idx, uint64 stop_idx);
   // --kinship: whiten the rows of G (the whole matrix in-core, or the block just read)
@@ -79,21 +115,29 @@ class Data {
   uint bandFactor = 1;
   uint nops = 0;
   std::vector<uint> start, stop;
-  double p_miss = 0.0;         // proportion of genotype missingness
-  PermMat perm;                // permuation order of SNPs
-  bool in_core_permuted = false;  // true only after G has actually been shuffled
-  bool logical_bed_perm = false;  // out-of-core BED read in permuted order without a .perm.bed copy
-  Mat2D G;                     // genotype matrix, can be initial E or centered E, which is nsamples x nsnps;
-  Mat2D P;                     // normalized genotype likelihoods, (nsamples x 2) x nsnps.
-  Mat1D F;                     // observed or estimated population allele frequency
-  Mat1D Dc;                    // diagnal vector of covariance matrix
-  ArrBool C;                   // nsnps x nsample, if there is missing value
-  Arr2D centered_geno_lookup;  // lookup table for centering genotypes
+  double p_miss = 0.0;             // proportion of genotype missingness
+  PermMat perm;                    // permuation order of SNPs
+  bool in_core_permuted = false;   // true only after G has actually been shuffled
+  bool metadata_permuted = false;  // the .bim read is the permuted copy's (BED rewritten out-of-core)
+  // --svd 1 and 2 of a BED: the 2-bit calls in place of G (PackedPca.hpp), its
+  // sites in the order of G's columns. In-core read_all() makes it when
+  // packed_pca(); out-of-core set_packed_sites(), without the calls.
+  std::unique_ptr<PCAone::PackedGenotypes> packed;
+  Mat2D G;                         // genotype matrix, can be initial E or centered E, which is nsamples x nsnps;
+  Mat2D P;                         // normalized genotype likelihoods, (nsamples x 2) x nsnps.
+  Mat1D F;                         // observed or estimated population allele frequency
+  Mat1D Dc;                        // diagnal vector of covariance matrix
+  ArrBool C;                       // nsnps x nsample, if there is missing value
+  Arr2D centered_geno_lookup;      // lookup table for centering genotypes
+  // out-of-core --project: read_block_initial() returns a missing call as NaN
+  // instead of 0 (the reference mean), so the caller can tell it from a called
+  // genotype. Only with frequencies taken from the reference (!params.dopca).
+  bool mark_missing = false;
   int svd_scale = SCALE_STANDARDIZE_GENETIC;  // scaling applied to the decomposed matrix; 0 = none
   int svd_gscale = 1;                         // 1: genotypes coded 0..1; 2: dosages coded 0..2
-  Int1D keepSNPs;              // store index of SNPs to keep
-  Int1D keepRefSNPs;           // store matching SNP indices in the reference .mbim
-  Int1D flipSNPs;              // local SNP indices (into keepSNPs order) with flipped alleles
+  Int1D keepSNPs;                             // store index of SNPs to keep
+  Int1D keepRefSNPs;                          // store matching SNP indices in the reference .mbim
+  Int1D flipSNPs;                             // local SNP indices (into keepSNPs order) with flipped alleles
 };
 
 #endif  // PCAONE_DATA_

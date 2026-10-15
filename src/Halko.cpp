@@ -7,6 +7,7 @@
 #include "Halko.hpp"
 
 #include "Common.hpp"
+#include "LinAlg.hpp"
 #include "RSVD.hpp"
 #include "Utils.hpp"
 
@@ -51,8 +52,8 @@ void RsvdOpData::computeUSV(int p, double tol) {
     // the Householder reflectors, and rewritten by the next computeGandH().
     // (A second QR of Q used to follow; Q is orthonormal to machine precision
     // already, so it cost as much as the first and changed nothing but signs.)
-    Eigen::HouseholderQR<Eigen::Ref<Mat2D>> qr(G);
-    R = qr.matrixQR().topRows(size()).triangularView<Eigen::Upper>();
+    TallQR qr(G);
+    R = qr.matrixR();
     B.noalias() = R.transpose().fullPivHouseholderQr().solve(H.transpose());
     Eigen::JacobiSVD<Mat2D> svd(B, Eigen::ComputeThinU | Eigen::ComputeThinV);
     Ucur = svd.matrixV().leftCols(nk);
@@ -69,9 +70,8 @@ void RsvdOpData::computeUSV(int p, double tol) {
           p = std::log2(bands);
         } else {
           U = Ucur;
-          Mat2D W = Mat2D::Zero(nrow, nk);
-          W.topRows(size()) = svd.matrixU().leftCols(nk);
-          V.noalias() = qr.householderQ() * W;  // Q * W
+          V.resize(nrow, nk);
+          qr.applyQ(svd.matrixU().leftCols(nk), V);  // Q * W
           S = svd.singularValues().head(nk);
           if (data->params.verbose && !data->params.missme) cao.print(tick.date(), "stops at epoch =", pi + 1);
           if (!(diff < tol) && !data->params.missme)
@@ -90,6 +90,29 @@ void RsvdOpData::computeUSV(int p, double tol) {
   U = Ucur;
 }
 
+void RsvdOpData::add_block(uint64 start_idx, uint64 stop_idx, Mat2D& G, Mat2D& Hb) {
+  const uint64 n = stop_idx - start_idx + 1;
+  tick.clock();
+  if (data->packed_pca()) {
+    // the 2-bit calls of the block straight into the products (PackedPca.hpp)
+    const uint8_t* rec = data->read_block_packed(start_idx, stop_idx);
+    data->readtime += tick.reltime();
+    data->set_packed_sites(standardize, start_idx, n);
+    data->packed->mul_Xt_Y(start_idx, Omg, G.middleRows(start_idx, n), rec);
+    data->packed->mul_X_Y(start_idx, G.middleRows(start_idx, n), Hb, true, rec);
+    return;
+  }
+  if (!update) {
+    data->read_block_initial(start_idx, stop_idx, standardize);
+  } else {
+    data->read_block_update(start_idx, stop_idx, U, S, V.transpose(), standardize);
+  }
+  data->readtime += tick.reltime();
+  data->whiten_G();
+  mul_Xt_Y(data->G, Omg, G.middleRows(start_idx, n));
+  mul_X_Y(data->G, G.middleRows(start_idx, n), Hb, true);
+}
+
 void NormalRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
   if (!data->snpmajor) {
     cao.error("only work with snp major input data now.");
@@ -103,25 +126,34 @@ void NormalRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
 
   if (!data->params.out_of_core) {
     if (pi == 0) {
-      if (update) {
-        data->fit_with_pi(U, S, V.transpose());
-      }
-      if (standardize) {
-        if (data->params.pcangsd) {
-          data->pcangsd_standardize_E(U, S, V.transpose());
-        } else {
-          data->standardize_E();
+      if (data->packed) {
+        data->set_packed_sites(standardize);  // no EM: packed_pca()
+      } else {
+        if (update) {
+          data->fit_with_pi(U, S, V.transpose());
+        }
+        if (standardize) {
+          if (data->params.pcangsd) {
+            data->pcangsd_standardize_E(U, S, V.transpose());
+          } else {
+            data->standardize_E();
+          }
         }
       }
       data->whiten_G();
     }
     if (pi > 0) {
-      Eigen::HouseholderQR<Eigen::Ref<Mat2D>> qr(H);
-      Omg.noalias() = qr.householderQ() * Mat2D::Identity(cols(), size);  // hold H in Omega
+      TallQR qr(H);
+      qr.applyQ(Mat2D::Identity(size, size), Omg);  // hold H in Omega
       PCAone::flipOmg(Omg2, Omg);
     }
-    mul_Xt_Y(data->G, Omg, G);
-    H.noalias() = data->G * G;
+    if (data->packed) {
+      data->packed->mul_Xt_Y(0, Omg, G);
+      data->packed->mul_X_Y(0, G, H);
+    } else {
+      mul_Xt_Y(data->G, Omg, G);
+      mul_X_Y(data->G, G, H);
+    }
     return;
   }
 
@@ -129,26 +161,12 @@ void NormalRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
   // data->G is always nsamples x nsnps;
   // for nsnps > nsamples
   if (pi > 0) {
-    Eigen::HouseholderQR<Eigen::Ref<Mat2D>> qr(H);
-    Omg.noalias() = qr.householderQ() * Mat2D::Identity(cols(), size);
+    TallQR qr(H);
+    qr.applyQ(Mat2D::Identity(size, size), Omg);
   }
   H = Mat2D::Zero(cols(), size);
   data->check_file_offset_first_var();
-  for (uint i = 0; i < data->nblocks; ++i) {
-    start_idx = data->start[i];
-    stop_idx = data->stop[i];
-    actual_block_size = stop_idx - start_idx + 1;
-    tick.clock();
-    if (!update) {
-      data->read_block_initial(start_idx, stop_idx, standardize);
-    } else {
-      data->read_block_update(start_idx, stop_idx, U, S, V.transpose(), standardize);
-    }
-    data->readtime += tick.reltime();
-    data->whiten_G();
-    mul_Xt_Y(data->G, Omg, G.middleRows(start_idx, actual_block_size));
-    H.noalias() += data->G * G.middleRows(start_idx, actual_block_size);
-  }
+  for (uint i = 0; i < data->nblocks; ++i) add_block(data->start[i], data->stop[i], G, H);
 }
 
 void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
@@ -167,7 +185,7 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
     H2.setZero();
   }
   if (!data->params.out_of_core) {
-    if (pi == 0) {
+    if (pi == 0 && !data->packed) {
       if (update) {
         data->fit_with_pi(U, S, V.transpose());
       }
@@ -179,56 +197,73 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
         }
       }
       data->whiten_G();
+    }
+    if (pi == 0) {
       bandsize = pi_offset > 0 ? data->params.bands : 1;
       // blocksize: how many snps in each block
       blocksize = (unsigned int)ceil((double)data->nsnps / data->params.bands);
       if (blocksize < data->params.bands)
         cao.warn("block size < window size. please consider the IRAM method with --svd 0");
       // Keep the same column order across EM iterations and final scaling.
+      // (the 2-bit calls were read in the shuffled order: FileBed::read_all_packed())
       if (data->params.perm && !data->in_core_permuted) {
         cao.print(tick.date(), "permuting data matrix by columns in place");
         PCAone::permute_matrix(data->G, data->perm, data->params.seed);
         data->in_core_permuted = true;
       }
+      if (data->packed) data->set_packed_sites(standardize);
     }
     // bandsize: how many blocks in each band, 2, 4, 8, 16, 32, 64, ...
     bandsize = fmin(bandsize * 2, data->params.bands);
-    // b: the index of current block
+    // The schedule of the band: each block b adds into H1 or H2, and Omg is
+    // updated after some of them. A run of blocks with the same Omg that add
+    // into the same H is one product over their sites, which are contiguous:
+    // 2 products an epoch once the band is full, in place of one per block.
+    struct Step {
+      bool h1, update, full;
+    };
+    std::vector<Step> plan(data->params.bands);
     for (uint b = 0, i = 1; b < data->params.bands; ++b, ++i) {
-      // half-open [start_idx, start_idx + actual_block_size). With fewer than
-      // bands^2 sites the trailing blocks are empty: ceil(M / bands) * b can
-      // pass M, and the old inclusive stop_idx then underflowed the unsigned
-      // block size, so the next line asked for ~2^64 rows (std::bad_alloc).
-      // An empty block contributes nothing but keeps the band schedule intact.
-      start_idx = std::min<uint64>((uint64)b * blocksize, data->nsnps);
-      stop_idx = std::min<uint64>((uint64)(b + 1) * blocksize, data->nsnps);
-      actual_block_size = stop_idx - start_idx;
-      mul_Xt_Y(data->G.middleCols(start_idx, actual_block_size), Omg, G.middleRows(start_idx, actual_block_size));
-
-      if (i <= bandsize / 2) {
-        // continues to add in data based on current band
-        H1.noalias() += data->G.middleCols(start_idx, actual_block_size) * G.middleRows(start_idx, actual_block_size);
-      } else {
-        H2.noalias() += data->G.middleCols(start_idx, actual_block_size) * G.middleRows(start_idx, actual_block_size);
-      }
-
+      // continues to add in data based on current band
+      plan[b].h1 = i <= bandsize / 2;
       // use the first quarter band of succesive iteration (H1)
       // for extra power iteration updates with the last used band (H2)
       const bool adjacent = (pe > 0 && (b + 1) == std::pow(2, pe - 1) && std::pow(2, pe) < data->params.bands);
-      if ((b + 1) < bandsize && !adjacent) continue;
-
       // add up H and update Omg
-      if (!((i == bandsize) || (i == bandsize / 2) || adjacent)) continue;
-      H = H1 + H2;
-      Eigen::HouseholderQR<Mat2D> qr(H);
-      Omg.noalias() = qr.householderQ() * Mat2D::Identity(cols(), size);
-      PCAone::flipOmg(Omg2, Omg);
-      if (i == bandsize) {
-        H1.setZero();
-        i = 0;
+      plan[b].update = !((b + 1) < bandsize && !adjacent) && ((i == bandsize) || (i == bandsize / 2) || adjacent);
+      plan[b].full = plan[b].update && i == bandsize;
+      if (plan[b].full) i = 0;
+    }
+    for (uint b0 = 0, b1; b0 < data->params.bands; b0 = b1) {
+      b1 = b0 + 1;
+      while (b1 < data->params.bands && !plan[b1 - 1].update && plan[b1].h1 == plan[b0].h1) ++b1;
+      // half-open [start_idx, stop_idx). With fewer than bands^2 sites the
+      // trailing blocks are empty: ceil(M / bands) * b can pass M, and the old
+      // inclusive stop_idx then underflowed the unsigned block size, so the
+      // next line asked for ~2^64 rows (std::bad_alloc). An empty block
+      // contributes nothing but keeps the band schedule intact.
+      start_idx = std::min<uint64>((uint64)b0 * blocksize, data->nsnps);
+      stop_idx = std::min<uint64>((uint64)b1 * blocksize, data->nsnps);
+      actual_block_size = stop_idx - start_idx;
+      Mat2D& Hb = plan[b0].h1 ? H1 : H2;
+      if (data->packed) {
+        data->packed->mul_Xt_Y(start_idx, Omg, G.middleRows(start_idx, actual_block_size));
+        data->packed->mul_X_Y(start_idx, G.middleRows(start_idx, actual_block_size), Hb, true);
       } else {
-        H2.setZero();
+        mul_Xt_Y(data->G.middleCols(start_idx, actual_block_size), Omg, G.middleRows(start_idx, actual_block_size));
+        mul_X_Y(data->G.middleCols(start_idx, actual_block_size), G.middleRows(start_idx, actual_block_size), Hb, true);
       }
+      const Step& last = plan[b1 - 1];
+      if (!last.update) continue;
+      H = H1 + H2;
+      Mat2D Hq = H;  // H is read again by computeUSV(): factor a copy
+      TallQR qr(Hq);
+      qr.applyQ(Mat2D::Identity(size, size), Omg);
+      PCAone::flipOmg(Omg2, Omg);
+      if (last.full)
+        H1.setZero();
+      else
+        H2.setZero();
     }
 
     return;
@@ -240,24 +275,7 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
   // band : 2, 4, 8, 16, 32, 64
   bandsize = fmin(bandsize * 2, data->nblocks);
   for (uint b = 0, i = 1; b < data->nblocks; ++b, ++i) {
-    start_idx = data->start[b];
-    stop_idx = data->stop[b];
-    actual_block_size = stop_idx - start_idx + 1;
-    tick.clock();
-    if (!update) {
-      data->read_block_initial(start_idx, stop_idx, standardize);
-    } else {
-      data->read_block_update(start_idx, stop_idx, U, S, V.transpose(), standardize);
-    }
-    data->readtime += tick.reltime();
-    data->whiten_G();
-    mul_Xt_Y(data->G, Omg, G.middleRows(start_idx, actual_block_size));
-
-    if (i <= bandsize / 2) {
-      H1.noalias() += data->G * G.middleRows(start_idx, actual_block_size);
-    } else {
-      H2.noalias() += data->G * G.middleRows(start_idx, actual_block_size);
-    }
+    add_block(data->start[b], data->stop[b], G, i <= bandsize / 2 ? H1 : H2);
 
     const bool adjacent =
         (pe > 0 && (b + 1) == std::pow(2, pe - 1) * data->bandFactor && std::pow(2, pe) < data->params.bands);
@@ -267,8 +285,9 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
     // add up H and update Omg
     if (!((i == bandsize) || (i == bandsize / 2) || adjacent)) continue;
     H = H1 + H2;
-    Eigen::HouseholderQR<Mat2D> qr(H);
-    Omg.noalias() = qr.householderQ() * Mat2D::Identity(cols(), size);
+    Mat2D Hq = H;  // H is read again by computeUSV(): factor a copy
+    TallQR qr(Hq);
+    qr.applyQ(Mat2D::Identity(size, size), Omg);
     PCAone::flipOmg(Omg2, Omg);
     if (i == bandsize) {
       H1.setZero();
@@ -279,17 +298,20 @@ void FancyRsvdOpData::computeGandH(Mat2D& G, Mat2D& H, int pi) {
   }
 }
 
+static RsvdOpData* new_rsvd(Data* data, const Param& params, uint k, uint os) {
+  if (params.svd_t == SvdType::PCAoneAlg2) return new FancyRsvdOpData(data, k, os);
+  return new NormalRsvdOpData(data, k, os);
+}
+
 void run_pca_with_halko(Data* data, const Param& params) {
   Mat2D Vpre;
-  RsvdOpData* rsvd;
-  if (params.svd_t == SvdType::PCAoneAlg2) {
-    cao.print(tick.date(), "initialize window-based RSVD (winSVD) with",
-              params.out_of_core ? "out-of-core" : "in-core");
-    rsvd = new FancyRsvdOpData(data, params.k, params.oversamples);
-  } else {
-    cao.print(tick.date(), "initialize single-pass RSVD (sSVD) with", params.out_of_core ? "out-of-core" : "in-core");
-    rsvd = new NormalRsvdOpData(data, params.k, params.oversamples);
-  }
+  cao.print(tick.date(), "initialize",
+            params.svd_t == SvdType::PCAoneAlg2 ? "window-based RSVD (winSVD) with" : "single-pass RSVD (sSVD) with",
+            params.out_of_core ? "out-of-core" : "in-core", data->packed_pca() ? "on the 2-bit calls" : "");
+  // EM-PCA fits the individual allele frequencies with em_k PCs, which is -k
+  // unless --em-k says otherwise; the final matrix is decomposed for -k
+  RsvdOpData* rsvd = params.missme ? new_rsvd(data, params, params.em_k, params.em_oversamples)
+                                   : new_rsvd(data, params, params.k, params.oversamples);
   if (!params.missme) {
     if (params.genetic) {
       rsvd->setFlags(false, true);
@@ -325,18 +347,36 @@ void run_pca_with_halko(Data* data, const Param& params) {
     }
     if (params.maxiter > 0 && !(diff < params.tolem)) warn_em_not_converged(params, diff);
 
-    if (params.emu) {
-      cao.print(tick.date(), "standardize the final matrix for EMU");
-      rsvd->setFlags(true, true);
-      rsvd->computeUSV(params.maxp, params.tol);
-      flip_UV(rsvd->U, rsvd->V, false);
-    }
-
+    // PCAngsd's covariance, and the -k eigenvectors of it in .eigvecs2, come from
+    // the individual allele frequencies of the --em-k PCs the EM fitted
     if (params.pcangsd && (params.file_t == FileType::BEAGLE)) {
       cao.print(tick.date(), "estimate GRM for pcangsd");
       data->pcangsd_standardize_E(rsvd->U, rsvd->S, rsvd->V.transpose());
       // TODO: use matrix-free method e.g Arnoldi to decompose the cov
-      write_pcangsd_cov(data->G, data->Dc, data->nsnps, params);
+      data->write_pcangsd_cov();
+    }
+
+    // EMU decomposes its final matrix standardized; PCAngsd writes the PCs of
+    // the EM's matrix of expected genotypes, which needs one more decomposition
+    // only when --em-k fitted another number of PCs than the -k written.
+    if (params.emu || params.em_k != params.k) {
+      if (params.emu) cao.print(tick.date(), "standardize the final matrix for EMU");
+      if (params.em_k != params.k) {
+        // The update below rebuilds the matrix from the U, S, V it is given, so
+        // a solver for -k PCs takes over the fit of the --em-k ones: they give
+        // the individual allele frequencies, and start its power iterations.
+        cao.print(tick.date(), "decompose the final matrix for", params.k,
+                  "PCs (-k), given the individual allele frequencies of the", params.em_k, "PCs of the EM (--em-k)");
+        RsvdOpData* out = new_rsvd(data, params, params.k, params.oversamples);
+        out->U = std::move(rsvd->U);
+        out->S = std::move(rsvd->S);
+        out->V = std::move(rsvd->V);
+        delete rsvd;
+        rsvd = out;
+      }
+      rsvd->setFlags(true, params.emu);
+      rsvd->computeUSV(params.maxp, params.tol);
+      flip_UV(rsvd->U, rsvd->V, false);
     }
   }
   // output PI

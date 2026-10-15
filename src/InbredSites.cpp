@@ -10,11 +10,15 @@
 #include "FileBeagle.hpp"
 #include "FilePgen.hpp"
 #include "FilePlink.hpp"
+#include "LinAlg.hpp"
+#include "Stats.hpp"
+#include "TextIO.hpp"
 #include "Utils.hpp"
+#include "Variants.hpp"
 
 // Shared floor for genotype probabilities, applied identically to the null
 // and the alternative model, solely to keep log() finite.  See
-// docs/hwe-lrt-fix.md for why a one-sided floor was a bug.
+// dev/hwe-lrt-fix.md for why a one-sided floor was a bug.
 static constexpr double PROB_EPS = 1e-12;
 
 // The target is paired with the reference site by site, so its variants must be
@@ -35,9 +39,8 @@ static void check_same_sites(const Param& params) {
   };
   std::string lt, lm;
   uint64 n = 0;
-  while (getline(ft, lt)) {
-    if (lt.empty() || (pvar && lt[0] == '#')) continue;
-    if (pvar) lt = pvar_line_to_bim_line(lt, path);
+  while (read_bim_line(ft, pvar, path, lt)) {
+    if (!pvar && lt.empty()) continue;
     if (!getline(fm, lm)) break;  // the counts are compared by the caller
     ++n;
     if (key(lt) != key(lm))
@@ -119,7 +122,7 @@ void calc_inbreed_site_lrt(
   if (type != 1 && type != 2) cao.error("type must be 1 or 2");
   const int nsnps = size;
   const int nsamples = PI.rows();
-  int nneg = 0;       // sites where the statistic came out negative
+  int nneg = 0;        // sites where the statistic came out negative
   double worst = 0.0;  // and the most negative value among them
 #pragma omp parallel for reduction(+ : nneg) reduction(min : worst)
   for (int j = 0; j < nsnps; j++) {
@@ -133,7 +136,7 @@ void calc_inbreed_site_lrt(
       // lies in the range where all three are non-negative they sum to one
       // exactly, so renormalising was a no-op; when the old 1e-4 floor fired it
       // rescaled the ALTERNATIVE while the NULL below was left raw, putting the
-      // two models on different scales. See docs/hwe-lrt-fix.md.
+      // two models on different scales. See dev/hwe-lrt-fix.md.
       //
       // F is only bounded to [-1, 1], so it can leave that range: measured at
       // 2.5% of sites on example/plink.chr1 (400 samples, K=3). There a
@@ -200,8 +203,7 @@ void calc_inbreed_site_lrt(
     T(jj) = fmax(0.0, t);
   }
   if (nneg > 0)
-    cao.warn(nneg, " of ", nsnps,
-             " sites have a negative likelihood ratio (most negative ", worst,
+    cao.warn(nneg, " of ", nsnps, " sites have a negative likelihood ratio (most negative ", worst,
              ") and are reported as 0. this is the F estimator being a moment estimator rather than the maximum "
              "likelihood one, not a numerical artefact; such sites are never significant.");
 }
@@ -363,16 +365,27 @@ void write_hwe_per_site(
     const std::string& fout, const std::string& fbim, const Mat1D& hwe, const Mat1D& lrt, const Mat1D& coef) {
   std::ifstream fin(fbim);
   if (!fin.is_open()) cao.error("can not open " + fbim);
-  std::ofstream ohwe(fout);
+  std::ofstream ohwe(fout, std::ios::binary);
   if (!ohwe.is_open()) cao.error("can not open " + fout);
+  ohwe << "#ID\tHWE_P\tLRT\tInbreeding_coefficient\n";
+  // the IDs are read in order; a line of numbers is formatted in place
+  TextBuf buf;
   std::string line;
   const std::string sep{" \t"};
-  int j = 0;
-  ohwe << "#ID\tHWE_P\tLRT\tInbreeding_coefficient\n";
+  Eigen::Index j = 0;
   while (getline(fin, line)) {
-    auto id = split_string(line, sep)[1];
-    ohwe << id << "\t" << hwe(j) << "\t" << lrt(j) << "\t" << coef(j) << "\n";
-    j++;
+    if (j >= coef.size()) cao.error(fbim + " has more sites than the " + std::to_string(coef.size()) + " analysed");
+    buf.append(split_string(line, sep).at(1));
+    char* p = buf.reserve(3 * (TEXT_NUM_MAX + 1) + 1);
+    for (double v : {hwe(j), lrt(j), coef(j)}) *p++ = '\t', p = put_g6(v, p);
+    *p++ = '\n';
+    buf.commit(p);
+    if (buf.size() >= (size_t(32) << 20)) buf.write_to(ohwe), buf.clear();
+    ++j;
   }
-  assert(j == coef.size());
+  buf.write_to(ohwe);
+  ohwe.close();
+  if (!ohwe) cao.error("error writing " + fout);
+  if (j != coef.size())
+    cao.error(fbim + " has " + std::to_string(j) + " sites but " + std::to_string(coef.size()) + " were analysed");
 }
