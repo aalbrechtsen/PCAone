@@ -6,7 +6,7 @@ all pairs at N = 10,000 and 20,000. Simulated data of the scaling test
 plink2 KING >= tau (the *_king.kin0 files).
 
 With a 4th argument, the M = 500,000 runs (scale_big_sim.py data, <big dir>/times.tsv)
-are added as dashed lines: in RAM up to N = 20,000, out-of-core above (open symbols).
+are added as dashed lines: in RAM where run, else out-of-core (open symbols).
 
 usage: slides_scaling.py <times.tsv> <run dir> <out.pdf> [<big dir>]
   times.tsv: name, seconds, return code, pairs (scale_new.sh output)
@@ -44,7 +44,7 @@ def main():
     T = {}
     for l in open(tfile):
         t = l.rstrip("\n").split("\t")
-        if len(t) == 4 and t[2] == "0":
+        if len(t) >= 4 and t[2] == "0":
             T[t[0]] = float(t[1])
     Ns = [1000, 2000, 5000, 10000, 20000, 100000]
     print("N\tstd_s\tdwg_s\tdwg_all_s\ttruth\tdwg_recall\tdwg_extra\tall_recall")
@@ -73,14 +73,16 @@ def main():
         B = {}
         for l in open(os.path.join(sys.argv[4], "times.tsv")):
             t = l.rstrip("\n").split("\t")
-            if len(t) == 4 and t[2] == "0":
+            if len(t) >= 4 and t[2] == "0":
                 B[t[0]] = float(t[1])
         for key, col, lab in [("std", "#666666", "standard PCAone"), ("dwg", "#0072B2", "dwg (default)")]:
+            # in RAM where it was run (all N with --v09), else out-of-core
             pts = []
             for N in [1000, 2000, 5000, 20000, 100000, 500000]:
-                name = f"{key}_N{N}" + ("_ooc" if N > 20000 else "")
-                if name in B:
-                    pts.append((N, B[name], N > 20000))
+                for name, ooc in ((f"{key}_N{N}", False), (f"{key}_N{N}_ooc", True)):
+                    if name in B:
+                        pts.append((N, B[name], ooc))
+                        break
             if not pts:
                 continue
             P = np.array([(n, t) for n, t, _ in pts])

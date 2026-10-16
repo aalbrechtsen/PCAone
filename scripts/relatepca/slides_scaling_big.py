@@ -2,9 +2,11 @@
 """Table for the M = 500,000 scaling slide: run times (stopped at 1 h: return
 code 124) of standard PCAone and dwg in RAM / out-of-core, and the relatives
 found against the true relationships written by scale_big_sim.py
-(<dir>/N<N>.truth.tsv, pedigree kinship >= tau).
+(<dir>/N<N>.truth.tsv, pedigree kinship >= tau). With a 5th column in
+times.tsv (peak RAM, kB; scale_v09.sh) the RAM is given with each time, and
+every N has a row in RAM and, from 20,000, one out-of-core (--v09).
 
-usage: slides_scaling_big.py <run dir>
+usage: slides_scaling_big.py <run dir> [--v09]
 """
 import os
 import sys
@@ -16,9 +18,10 @@ MEM = {"": "in RAM", "_ooc": "out-of-core"}
 def times(d):
     T = {}
     for l in open(os.path.join(d, "times.tsv")):
-        n, s, rc, _ = l.rstrip("\n").split("\t")
+        f = l.rstrip("\n").split("\t")
+        n, s, rc = f[0], f[1], f[2]
         if int(rc) != 143:  # 143: killed by hand, keep the earlier run
-            T[n] = (float(s), int(rc))
+            T[n] = (float(s), int(rc), float(f[4]) / 1048576 if len(f) > 4 else None)
     return T
 
 
@@ -29,12 +32,15 @@ def pairs(f):
 def fmt(t):
     if t is None:
         return "--"
-    s, rc = t
+    s, rc, gb = t
     if rc == 124:
         return "stopped ($>$1\\,h)"
     if rc != 0:
         return f"failed ({rc})"
-    return f"{s:.0f}\\,s" if s >= 10 else f"{s:.1f}\\,s"
+    out = f"{s:.0f}\\,s" if s >= 10 else f"{s:.1f}\\,s"
+    if gb is not None:
+        out += f", {gb:.0f}\\,GB" if gb >= 10 else f", {gb:.1f}\\,GB"
+    return out
 
 
 def th(n):
@@ -45,7 +51,11 @@ def th(n):
 def main():
     d = sys.argv[1]
     T = times(d)
-    for N, mem in [(1000, ""), (2000, ""), (5000, ""), (20000, ""), (100000, "_ooc"), (500000, "_ooc")]:
+    rows = [(1000, ""), (2000, ""), (5000, ""), (20000, ""), (100000, "_ooc"), (500000, "_ooc")]
+    if "--v09" in sys.argv:
+        rows = [(N, m) for N in (1000, 2000, 5000, 20000, 100000, 500000) for m in ("", "_ooc")
+                if m == "" or N >= 20000]
+    for N, mem in rows:
         tf = os.path.join(d, f"N{N}.truth.tsv")
         if not os.path.exists(tf):
             continue
